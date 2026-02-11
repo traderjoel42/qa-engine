@@ -1,0 +1,23 @@
+# Environment
+.env
+*.key
+
+# Dependencies
+node_modules/
+
+# Runtime
+evidence/
+logs/
+database/*.db
+results/
+
+# OS
+.DS_Store
+.Trash/
+
+# IDE
+.vscode/
+.idea/
+
+# Test
+coverage/
