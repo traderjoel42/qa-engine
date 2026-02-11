@@ -2,8 +2,9 @@
 
 **Phase:** 1, Week 1, Days 1-2  
 **Purpose:** Implementation-ready spec for `connectors/base-connector.js`  
-**For:** Claude Code technical evaluation → implementation  
-**References:** qa-engine-03-connector-pattern-spec.md, qa-engine-05-implementation-plan.md
+**For:** Claude Code implementation  
+**References:** qa-engine-03-connector-pattern-spec.md, qa-engine-05-implementation-plan.md  
+**Revision:** v1.1 — Post-feasibility review. Applied: `ConnectorTimeoutError` rename, relaxed Playwright rule, `hasState()` inventory fix, `executeAction` pattern clarification, infrastructure setup steps.
 
 ---
 
@@ -25,7 +26,7 @@ BaseConnector (abstract — this file)
               └── BrainstormyConnector (app-specific actions + selectors)
 ```
 
-**Rule:** BaseConnector never touches Playwright directly. It defines the contract. GenericWebAppConnector is where Playwright `page` interactions live.
+**Rule:** BaseConnector does not perform DOM interactions via Playwright. Metadata accessors (e.g., `getCurrentURL()` calling `page.url()`) are permitted in the base class. All DOM manipulation, element queries, and page navigation happen in GenericWebAppConnector.
 
 ### Constructor Dependencies
 
@@ -106,6 +107,7 @@ These are **IMPLEMENTED** in BaseConnector using an internal `Map`. All subclass
 |--------|------|-----------|---------|
 | `setState(key, value)` | IMPLEMENTED | `setState(key: string, value: any) → void` | Store key-value pair. |
 | `getState(key)` | IMPLEMENTED | `getState(key: string) → any` | Retrieve value. Returns `undefined` if not set. |
+| `hasState(key)` | IMPLEMENTED | `hasState(key: string) → boolean` | Check if a state key exists. |
 | `clearState()` | IMPLEMENTED | `clearState() → void` | Clear all state. Called during cleanup. |
 
 ### 2.8 Configuration Helper Methods
@@ -161,13 +163,15 @@ class ElementNotFoundError extends ConnectorError {
   }
 }
 
-class TimeoutError extends ConnectorError {
+class ConnectorTimeoutError extends ConnectorError {
   constructor(message, details = {}) {
     super(message, { ...details, recoverable: true });
-    this.name = 'TimeoutError';
+    this.name = 'ConnectorTimeoutError';
   }
 }
 ```
+
+> **Why `ConnectorTimeoutError` instead of `TimeoutError`?** Playwright exports its own `TimeoutError`. When GenericWebAppConnector catches Playwright timeouts to wrap them, having identically-named classes in the same catch block creates ambiguity. The `Connector` prefix disambiguates at the call site.
 
 ### 3.2 Error Handling Rules
 
@@ -239,10 +243,10 @@ cleanup()        → clearState()                         // resets everything
 
 ### 5.1 When Evidence Is Collected
 
-Evidence collection is **automatic** around every `performAction` call. The base pattern:
+Evidence collection is **automatic** around every `performAction` call. This wrapping lives in GenericWebAppConnector (not BaseConnector), since BaseConnector's `performAction` only serves as the unrecognized-action fallback.
 
 ```javascript
-// This lives in GenericWebAppConnector.performAction(), not BaseConnector
+// This pattern lives in GenericWebAppConnector.performAction()
 async performAction(action, params = {}) {
   const stepId = `${action}_${Date.now()}`;
   
@@ -251,7 +255,19 @@ async performAction(action, params = {}) {
   
   let result;
   try {
-    result = await this.executeAction(action, params);
+    // Dispatch to the appropriate method via switch statement
+    switch (action) {
+      case 'click':
+        result = await this.click(params.selector);
+        break;
+      case 'type':
+        result = await this.type(params.selector, params.text);
+        break;
+      // ... more actions
+      default:
+        // Chains up the hierarchy — BaseConnector throws "unsupported action"
+        result = await super.performAction(action, params);
+    }
   } catch (error) {
     // Failure evidence
     await this.collectEvidence(`failed_${stepId}`);
@@ -315,7 +331,7 @@ const {
   AuthenticationError,
   NavigationError,
   ElementNotFoundError,
-  TimeoutError
+  ConnectorTimeoutError
 } = require('./errors');
 
 /**
@@ -449,10 +465,10 @@ class BaseConnector {
    * @abstract
    * @param {number} [timeout=30000] - Maximum wait time in ms
    * @returns {Promise<void>}
-   * @throws {TimeoutError} If navigation doesn't complete within timeout
+   * @throws {ConnectorTimeoutError} If navigation doesn't complete within timeout
    */
   async waitForNavigation(timeout = 30000) {
-    throw new TimeoutError('Must implement waitForNavigation()');
+    throw new ConnectorTimeoutError('Must implement waitForNavigation()');
   }
 
   /**
@@ -529,10 +545,10 @@ class BaseConnector {
    * @param {string} selector - CSS selector
    * @param {number} [timeout=30000] - Maximum wait time in ms
    * @returns {Promise<void>}
-   * @throws {TimeoutError}
+   * @throws {ConnectorTimeoutError}
    */
   async waitFor(selector, timeout = 30000) {
-    throw new TimeoutError(`Must implement waitFor() — waiting for: ${selector}`);
+    throw new ConnectorTimeoutError(`Must implement waitFor() — waiting for: ${selector}`);
   }
 
   // ===================================================================
@@ -751,10 +767,10 @@ class ElementNotFoundError extends ConnectorError {
   }
 }
 
-class TimeoutError extends ConnectorError {
+class ConnectorTimeoutError extends ConnectorError {
   constructor(message, details = {}) {
     super(message, { ...details, recoverable: true });
-    this.name = 'TimeoutError';
+    this.name = 'ConnectorTimeoutError';
   }
 }
 
@@ -763,7 +779,7 @@ module.exports = {
   AuthenticationError,
   NavigationError,
   ElementNotFoundError,
-  TimeoutError
+  ConnectorTimeoutError
 };
 ```
 
@@ -792,12 +808,12 @@ describe('BaseConnector', () => {
     test('logout() throws ConnectorError');
     test('isAuthenticated() throws ConnectorError');
     test('navigate() throws NavigationError');
-    test('waitForNavigation() throws TimeoutError');
+    test('waitForNavigation() throws ConnectorTimeoutError');
     test('performAction() throws ConnectorError with action name');
     test('click() throws ElementNotFoundError');
     test('type() throws ElementNotFoundError');
     test('select() throws ElementNotFoundError');
-    test('waitFor() throws TimeoutError');
+    test('waitFor() throws ConnectorTimeoutError');
     test('extractData() throws ElementNotFoundError');
     test('extractMultiple() throws ConnectorError');
     test('exists() throws ConnectorError');
@@ -845,7 +861,7 @@ describe('ConnectorError hierarchy', () => {
   test('AuthenticationError sets phase to "authenticate" and recoverable to false');
   test('NavigationError sets phase to "navigate" and recoverable to true');
   test('ElementNotFoundError includes selector in message');
-  test('TimeoutError is recoverable by default');
+  test('ConnectorTimeoutError is recoverable by default');
   test('toJSON serializes correctly');
   test('all errors include timestamp');
 });
@@ -853,13 +869,41 @@ describe('ConnectorError hierarchy', () => {
 
 ---
 
-## 9. Files to Create
+## 9. Implementation Order for Claude Code
 
-| File | Purpose | Priority |
-|------|---------|----------|
-| `connectors/errors.js` | Error class hierarchy | Create first |
-| `connectors/base-connector.js` | Abstract base class | Create second |
-| `tests/connectors/base-connector.test.js` | Unit tests | Create third |
+### Step 1: Infrastructure Setup (pre-implementation)
+
+These items must exist before writing any connector code or tests.
+
+| Task | Details |
+|------|---------|
+| Create `jest.config.js` | `testMatch: ['**/tests/**/*.test.js']`, CommonJS transform not needed (no ESM) |
+| Update `package.json` test script | Change `"test": "echo \"Error: no test specified\" && exit 1"` → `"test": "jest"` |
+| Create `tests/connectors/` directory | Empty directory for test files |
+| Create `apps/brainstormy/config.json` | Use the Brainstormy config from qa-engine-03-connector-pattern-spec.md (Connector Configuration section). This doesn't block BaseConnector tests (which use mocks), but prevents it from becoming a forgotten dependency. |
+
+### Step 2: Connector Files (in order)
+
+| # | File | Purpose | Priority |
+|---|------|---------|----------|
+| 1 | `connectors/errors.js` | Error class hierarchy (Section 7) | Create first — BaseConnector imports it |
+| 2 | `connectors/base-connector.js` | Abstract base class (Section 6) | Create second — depends on errors.js |
+| 3 | `tests/connectors/base-connector.test.js` | Unit tests (Section 8) | Create third — validates both files above |
+
+### Step 3: Validation
+
+```bash
+# Run tests — all should pass
+npm test
+
+# Verify error hierarchy
+node -e "const e = require('./connectors/errors'); console.log(Object.keys(e));"
+# Should print: ConnectorError, AuthenticationError, NavigationError, ElementNotFoundError, ConnectorTimeoutError
+
+# Verify BaseConnector cannot be instantiated directly
+node -e "const BC = require('./connectors/base-connector'); new BC({}, {}, {});"
+# Should throw: "BaseConnector is abstract and cannot be instantiated directly"
+```
 
 ---
 
@@ -867,17 +911,21 @@ describe('ConnectorError hierarchy', () => {
 
 When sending this to Claude Code, emphasize:
 
-1. **No Playwright calls in BaseConnector.** All `this.page.*` interactions happen in GenericWebAppConnector (Days 1-2 second file).
+1. **Follow Section 9 order exactly.** Infrastructure setup first (jest config, directories), then errors.js, then base-connector.js, then tests. Each step depends on the previous one.
 
-2. **Evidence collector is a dependency, not built here.** Use a mock/stub in tests. The real `EvidenceCollector` is a parallel Week 1 deliverable.
+2. **BaseConnector does not perform DOM interactions via Playwright.** Metadata accessors like `getCurrentURL()` (which calls `page.url()`) are permitted. All DOM manipulation, element queries, and page navigation happen in GenericWebAppConnector.
 
-3. **The `new.target` guard** prevents direct instantiation. This is the standard JS pattern for abstract classes.
+3. **Evidence collector is a dependency, not built here.** Use a mock/stub in tests. The mock must implement the interface defined in Section 5.3. The real `EvidenceCollector` is a parallel Week 1 deliverable.
 
-4. **`performAction` is the key design pattern.** Each level in the hierarchy adds a `switch` block for its actions and falls through to `super.performAction()` for unrecognized actions. This is how agents stay app-agnostic.
+4. **The `new.target` guard** prevents direct instantiation. This is the standard JS pattern for abstract classes.
 
-5. **State management is intentionally simple.** A `Map` is sufficient. No need for proxies, observables, or persistence — state is ephemeral per test run.
+5. **`performAction` is the key design pattern.** Each level in the hierarchy adds a `switch` block for its actions and falls through to `super.performAction()` for unrecognized actions. This is how agents stay app-agnostic. The evidence-wrapping version lives in GenericWebAppConnector (see Section 5.1 for the pattern).
 
-6. **Error classification drives agent behavior.** `recoverable: true` means the agent can retry or skip. `recoverable: false` means abort the test run. This is used by the Test Orchestrator.
+6. **State management is intentionally simple.** A `Map` is sufficient. No need for proxies, observables, or persistence — state is ephemeral per test run.
+
+7. **Error classification drives agent behavior.** `recoverable: true` means the agent can retry or skip. `recoverable: false` means abort the test run. This is used by the Test Orchestrator.
+
+8. **`ConnectorTimeoutError` (not `TimeoutError`)** — renamed to avoid collision with Playwright's own `TimeoutError` export. GenericWebAppConnector will catch Playwright's `TimeoutError` and wrap it in `ConnectorTimeoutError` with attached evidence. The naming distinction makes this explicit at every call site.
 
 ---
 
