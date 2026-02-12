@@ -1153,7 +1153,147 @@ describe('BugDetector', () => {
     });
   });
 
-  // ── Group 10: _parseAnalysisResponse() Edge Cases ──
+  // ── Group 10: BugDetector + Real ApprovalManager Wiring (Days 3-4) ──
+
+  describe('BugDetector + Real ApprovalManager Wiring', () => {
+    const ApprovalManager = require('../../core/engine/approval-manager');
+
+    function createMockNotifier(overrides = {}) {
+      return {
+        send: jest.fn().mockResolvedValue({ id: 'msg-1', status: 'sent' }),
+        sendWithActions: jest.fn().mockResolvedValue({ id: 'msg-2', status: 'sent' }),
+        ...overrides
+      };
+    }
+
+    function createAutoFixableLLM() {
+      return createMockLLM({
+        complete: jest.fn().mockResolvedValue({
+          content: JSON.stringify({
+            root_cause: 'Similarity threshold too high',
+            affected_component: 'Memory service',
+            likely_location: 'services/search.py:retrieve_context()',
+            fix_approach: 'Adjust threshold from 0.7 to 0.6',
+            confidence: 0.85,
+            impact_assessment: 'High impact - memory recall broken'
+          }),
+          usage: { inputTokens: 500, outputTokens: 200 },
+          model: 'claude-sonnet-4-5-20250929'
+        })
+      });
+    }
+
+    function createNonAutoFixableLLM() {
+      return createMockLLM({
+        complete: jest.fn().mockResolvedValue({
+          content: JSON.stringify({
+            root_cause: 'Database connection pool exhausted',
+            affected_component: 'Database layer',
+            likely_location: 'db/pool.js',
+            fix_approach: 'Restart connection pool',
+            confidence: 0.7,
+            impact_assessment: 'High - connections failing'
+          }),
+          usage: { inputTokens: 500, outputTokens: 200 },
+          model: 'claude-sonnet-4-5-20250929'
+        })
+      });
+    }
+
+    test('auto-fixable bug triggers real ApprovalManager.requestApproval', async () => {
+      const notifier = createMockNotifier();
+      const approvalManager = new ApprovalManager({ notifier });
+      const llm = createAutoFixableLLM();
+      const detector = new BugDetector({ llm, approvalManager });
+
+      const bug = await detector.detectAndReport(createTestApp(), 'sentinel', createTestFailure());
+
+      expect(bug.auto_fixable).toBe(true);
+      expect(bug.approval_id).toMatch(/^[A-Z]{3}-1$/);
+      expect(notifier.sendWithActions).toHaveBeenCalledTimes(1);
+    });
+
+    test('real ApprovalManager sends correct actions to notifier', async () => {
+      const notifier = createMockNotifier();
+      const approvalManager = new ApprovalManager({ notifier });
+      const llm = createAutoFixableLLM();
+      const detector = new BugDetector({ llm, approvalManager });
+
+      const bug = await detector.detectAndReport(createTestApp(), 'sentinel', createTestFailure());
+
+      const [, , actions] = notifier.sendWithActions.mock.calls[0];
+      expect(actions).toHaveLength(3);
+      expect(actions[0].id).toContain('YES-');
+      expect(actions[1].id).toContain('NO-');
+      expect(actions[2].id).toContain('INFO-');
+    });
+
+    test('non-auto-fixable bug skips approval entirely', async () => {
+      const notifier = createMockNotifier();
+      const approvalManager = new ApprovalManager({ notifier });
+      const llm = createNonAutoFixableLLM();
+      const detector = new BugDetector({ llm, approvalManager });
+
+      const bug = await detector.detectAndReport(createTestApp(), 'sentinel', createTestFailure());
+
+      expect(bug.auto_fixable).toBe(false);
+      expect(bug.approval_id).toBeUndefined();
+      expect(notifier.sendWithActions).not.toHaveBeenCalled();
+    });
+
+    test('real ApprovalManager notification failure is non-fatal', async () => {
+      const notifier = createMockNotifier({
+        sendWithActions: jest.fn().mockRejectedValue(new Error('WhatsApp API down'))
+      });
+      const approvalManager = new ApprovalManager({ notifier });
+      const llm = createAutoFixableLLM();
+      const detector = new BugDetector({ llm, approvalManager });
+
+      const bug = await detector.detectAndReport(createTestApp(), 'sentinel', createTestFailure());
+
+      // Bug still created, approval record exists but notification failed
+      expect(bug.auto_fixable).toBe(true);
+      expect(bug.approval_id).toMatch(/^[A-Z]{3}-1$/);
+      expect(bug.bug_id).toBe('BUG-1');
+    });
+
+    test('approval message includes bug title and fix approach', async () => {
+      const notifier = createMockNotifier();
+      const approvalManager = new ApprovalManager({ notifier });
+      const llm = createAutoFixableLLM();
+      const detector = new BugDetector({ llm, approvalManager });
+
+      await detector.detectAndReport(createTestApp(), 'sentinel', createTestFailure());
+
+      const [, message] = notifier.sendWithActions.mock.calls[0];
+      expect(message).toContain('Similarity threshold too high');
+      expect(message).toContain('Adjust threshold');
+    });
+
+    test('approval uses app.integrations.notifications.recipients', async () => {
+      const notifier = createMockNotifier();
+      const approvalManager = new ApprovalManager({ notifier, recipients: ['+default'] });
+      const llm = createAutoFixableLLM();
+      const detector = new BugDetector({ llm, approvalManager });
+      const appWithRecipients = createTestApp({
+        integrations: { notifications: { recipients: ['+9999999999'] } }
+      });
+
+      await detector.detectAndReport(appWithRecipients, 'sentinel', createTestFailure());
+
+      const [recipients] = notifier.sendWithActions.mock.calls[0];
+      expect(recipients).toEqual(['+9999999999']);
+    });
+
+    test('existing bug detector tests unaffected (no approvalManager)', async () => {
+      const detector = createDetector(); // No approvalManager
+      const bug = await detector.detectAndReport(createTestApp(), 'sentinel', createTestFailure());
+      expect(bug.bug_id).toBe('BUG-1');
+      expect(bug.approval_id).toBeUndefined();
+    });
+  });
+
+  // ── Group 11: _parseAnalysisResponse() Edge Cases ──
 
   describe('_parseAnalysisResponse()', () => {
     let detector;
