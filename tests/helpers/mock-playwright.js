@@ -115,6 +115,81 @@ function createMockAppConfig(overrides = {}) {
 }
 
 /**
+ * Create a mock Playwright ElementHandle for citation elements.
+ * Uses getAttribute() and textContent() (Playwright ElementHandle methods),
+ * NOT the evaluate() pattern used by createMockElement.
+ */
+function createMockCitationElement(id, text) {
+  return {
+    getAttribute: jest.fn().mockResolvedValue(id),
+    textContent: jest.fn().mockResolvedValue(text),
+    evaluate: jest.fn().mockImplementation(fn =>
+      Promise.resolve(fn({ textContent: text, value: '', innerHTML: text, attributes: [] }))
+    )
+  };
+}
+
+/**
+ * Create a full Brainstormy app configuration object.
+ * Includes all selectors from GenericWebAppConnector, AIAppConnector,
+ * and BrainstormyConnector, plus url_patterns and extended timeouts.
+ */
+function createBrainstormyAppConfig(overrides = {}) {
+  return createMockAppConfig({
+    app_id: 'brainstormy',
+    name: 'Brainstormy',
+    connector: { type: 'brainstormy', base: 'ai-chat-app' },
+    config: {
+      auth_indicator: '[data-testid="user-menu"]',
+      ready_indicator: '[data-testid="app-loaded"]',
+      selectors: {
+        // Login (from GenericWebAppConnector config)
+        login_email: '[name="email"]',
+        login_password: '[name="password"]',
+        login_submit: '[type="submit"]',
+        logout: '[data-testid="logout-button"]',
+
+        // Chat (from AIAppConnector config)
+        chat_input: '[data-testid="chat-input"]',
+        chat_send: '[data-testid="send-button"]',
+        ai_message: '[data-testid="ai-message"]',
+        generating_indicator: '[data-testid="generating"]',
+
+        // Brainstormy-specific
+        new_project_button: '[data-testid="new-project-button"]',
+        project_name_input: '[data-testid="project-name-input"]',
+        create_project_submit: '[data-testid="create-project-button"]',
+        new_story_button: '[data-testid="new-story-button"]',
+        story_name_input: '[data-testid="story-name-input"]',
+        story_vertical_select: '[data-testid="story-vertical-select"]',
+        create_story_submit: '[data-testid="create-story-button"]',
+        new_session_button: '[data-testid="new-session-button"]',
+        session_type_select: '[data-testid="session-type-select"]',
+        create_session_submit: '[data-testid="create-session-button"]',
+        story_bible_button: '[data-testid="story-bible-button"]',
+        bible_template_prefix: '[data-testid="template-',
+        generate_bible_button: '[data-testid="generate-bible-button"]',
+        bible_content: '[data-testid="bible-content"]',
+        session_summary_button: '[data-testid="session-summary-button"]',
+        summary_content: '[data-testid="summary-content"]',
+        citation_element: '[data-citation-id]'
+      },
+      url_patterns: {
+        project_id: 'projects\\/([a-zA-Z0-9-]+)',
+        story_id: 'stories\\/([a-zA-Z0-9-]+)',
+        session_id: 'sessions\\/([a-zA-Z0-9-]+)'
+      },
+      timeouts: {
+        ai_response: 60000,
+        bible_generation: 120000,
+        navigation: 30000
+      }
+    },
+    ...overrides
+  });
+}
+
+/**
  * Create a mock Playwright ConsoleMessage.
  */
 function createMockConsoleMessage({ type = 'log', text = '', url, lineNumber, columnNumber } = {}) {
@@ -158,7 +233,9 @@ function createMockResponse({ status = 200, statusText = 'OK', headers = {} } = 
 module.exports = {
   createMockPage,
   createMockElement,
+  createMockCitationElement,
   createMockAppConfig,
+  createBrainstormyAppConfig,
   createMockConsoleMessage,
   createMockRequest,
   createMockResponse
