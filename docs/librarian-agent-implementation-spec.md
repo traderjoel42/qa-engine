@@ -91,7 +91,7 @@ Each helper returns a complete scenario object with `{ id, name, steps[], assert
 
 ### D3: Accuracy Scoring via analyzeResults(testRunResult)
 
-LibrarianAgent's `analyzeResults(testRunResult)` calls `super.analyzeResults(testRunResult)` first, then enriches by scanning `testRunResult.scenarios[].assertionResults[]` for its custom assertion types. No mutable instance state needed — all data flows through the `testRunResult` parameter.
+LibrarianAgent's `analyzeResults(testRunResult)` calls `super.analyzeResults(testRunResult)` first, then enriches by scanning `testRunResult.scenarios[].assertions[]` for its custom assertion types. No mutable instance state needed — all data flows through the `testRunResult` parameter.
 
 Three computed metrics with configurable thresholds:
 
@@ -617,7 +617,7 @@ class LibrarianAgent extends BaseAgent {
     const completenessResults = [];
 
     for (const scenario of (testRunResult.scenarios || [])) {
-      for (const ar of (scenario.assertionResults || [])) {
+      for (const ar of (scenario.assertions || [])) {
         switch (ar.type) {
           case 'citation_accuracy':
             citationAccResults.push(ar);
@@ -1381,7 +1381,7 @@ File path is flat: `tests/agents/librarian-agent.test.js` (NOT nested `tests/age
 Key testing patterns:
 - Test assertion handlers directly by calling `agent.evaluateAssertion(assertion, scenarioContext)`
 - Build `scenarioContext` with mock step results using helper functions
-- For `analyzeResults`, build `testRunResult` with mock `scenarios[].assertionResults[]`
+- For `analyzeResults`, build `testRunResult` with mock `scenarios[].assertions[]`
 - For `generateReport`, pass the analysis object from `analyzeResults`
 - Verify super calls by checking baseAnalysis/baseReport fields are present in output
 
@@ -1421,7 +1421,7 @@ All 14 issues from v1 feasibility review addressed:
 | # | Issue | Resolution |
 |---|-------|------------|
 | 1 | Wrong import path `../base/agent` | Fixed → `require('../base-agent')` |
-| 2 | `analyzeResults()` wrong signature/async/super | Fixed → `async analyzeResults(testRunResult)` with `super.analyzeResults(testRunResult)` call, reads from `testRunResult.scenarios[].assertionResults[]` not instance state |
+| 2 | `analyzeResults()` wrong signature/async/super | Fixed → `async analyzeResults(testRunResult)` with `super.analyzeResults(testRunResult)` call, reads from `testRunResult.scenarios[].assertions[]` not instance state |
 | 3 | `generateReport()` wrong signature/async/super | Fixed → `async generateReport(analysis)` with `super.generateReport(analysis)` call, takes analysis param not instance state |
 | 4 | `_getCustomAssertionHandler()` doesn't exist | Fixed → override `evaluateAssertion(assertion, scenarioContext)` with switch + `super.evaluateAssertion()` fallback |
 | 5 | Assertion handler signature + throw vs return | Fixed → handlers return `{ type, passed, message, expected, actual, durationMs }`, never throw |
