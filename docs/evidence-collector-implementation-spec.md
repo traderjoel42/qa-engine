@@ -2,7 +2,8 @@
 
 **Phase:** 1, Week 1, Days 1-2  
 **Purpose:** Implementation-ready spec for `core/engine/evidence-collector.js`  
-**For:** Claude Code evaluation → implementation  
+**For:** Claude Code implementation  
+**Revision:** v1.1 — Post-feasibility review. Fixed: timing duration calculation (BUG 2), async capture race condition (BUG 3), request.response() docs (BUG 1), redaction list sync (MISMATCH 1), filename sanitization docs (GAP 2). Added BaseConnector test mock update note (MISMATCH 2).  
 **References:** qa-engine-02-core-engine-spec.md (Section 4), qa-engine-04-database-schema-spec.md (evidence_metadata table)  
 **Depends on:** Nothing — no internal QA Engine dependencies. Uses Playwright and filesystem only.  
 **Depended on by:** `connectors/base-connector.js` (already implemented — delegates 4 methods to this class)
@@ -120,7 +121,7 @@ Screenshots use a sequential counter + step name + timestamp for sortability:
 ```
 
 - **counter**: 3-digit zero-padded (001, 002, ...) — ensures filesystem sort order matches capture order
-- **stepName**: Sanitized (alphanumeric + underscores only, truncated to 50 chars)
+- **stepName**: Sanitized (alphanumeric, underscores, and hyphens only — truncated to 50 chars)
 - **timestamp**: Unix milliseconds — ensures uniqueness
 - **type**: `full` or `viewport`
 
@@ -235,7 +236,8 @@ const REDACT_HEADERS = [
   'cookie',
   'set-cookie',
   'x-api-key',
-  'x-auth-token'
+  'x-auth-token',
+  'x-csrf-token'
 ];
 
 const REDACT_BODY_FIELDS = [
@@ -352,6 +354,7 @@ class EvidenceCollector {
     // Internal buffers
     this._consoleLogs = [];
     this._networkRequests = [];
+    this._pendingCaptures = [];
     this._screenshotCounter = 0;
     this._startedAt = new Date().toISOString();
 
@@ -410,6 +413,10 @@ class EvidenceCollector {
 
     // Write accumulated data to disk
     try {
+      // Await any in-flight network capture promises before writing
+      await Promise.allSettled(this._pendingCaptures);
+      this._pendingCaptures = [];
+
       await this._ensureDirectories();
 
       // Write console logs
@@ -618,16 +625,23 @@ class EvidenceCollector {
 
   /**
    * Handle completed network requests.
+   * In Playwright v1.58, request.response() is synchronous and returns Response | null.
    * @param {import('playwright').Request} request
    */
   _onRequestFinished(request) {
     try {
-      const response = request.response ? request.response() : null;
+      const response = request.response();
       
-      // Build entry asynchronously but don't await in the listener
-      this._captureRequest(request, response).catch(err => {
-        console.error('[EvidenceCollector] Request capture error:', err.message);
-      });
+      // Track the async capture promise so cleanup can await it
+      const promise = this._captureRequest(request, response);
+      this._pendingCaptures.push(promise);
+      promise
+        .catch(err => {
+          console.error('[EvidenceCollector] Request capture error:', err.message);
+        })
+        .finally(() => {
+          this._pendingCaptures = this._pendingCaptures.filter(p => p !== promise);
+        });
     } catch (error) {
       console.error('[EvidenceCollector] Request finished handler error:', error.message);
     }
@@ -662,23 +676,26 @@ class EvidenceCollector {
   /**
    * Capture request/response details for a completed request.
    * @param {import('playwright').Request} request
-   * @param {Promise<import('playwright').Response|null>} responsePromise
+   * @param {import('playwright').Response|null} response - Response object (synchronous in Playwright v1.58)
    */
-  async _captureRequest(request, responsePromise) {
-    let response = null;
-    try {
-      response = await responsePromise;
-    } catch (error) {
-      // Response may not be available
+  async _captureRequest(request, response) {
+    const status = response ? response.status() : null;
+
+    // Calculate duration from timing data
+    // request.timing() returns timestamps, not durations.
+    // Duration = responseEnd - startTime. Both may be -1 if unavailable.
+    const timing = request.timing();
+    let duration = 0;
+    if (timing && timing.responseEnd > 0 && timing.startTime >= 0) {
+      duration = Math.round(timing.responseEnd - timing.startTime);
     }
 
-    const status = response ? response.status() : null;
     const entry = {
       url: request.url(),
       method: request.method(),
       status,
       statusText: response ? response.statusText() : null,
-      duration: request.timing()?.responseEnd ?? 0,
+      duration,
       resourceType: request.resourceType(),
       failed: status !== null && status >= 400,
       failureReason: null,
@@ -756,7 +773,8 @@ class EvidenceCollector {
 
   /**
    * Sanitize a step name for use in filenames.
-   * Replaces non-alphanumeric characters with underscores, truncates to 50 chars.
+   * Replaces non-alphanumeric characters (except underscores and hyphens) with
+   * underscores, collapses runs, and truncates to 50 chars.
    * 
    * @param {string} name - Raw step name
    * @returns {string} Filesystem-safe name
@@ -827,11 +845,13 @@ describe('EvidenceCollector', () => {
 
   describe('cleanup()', () => {
     test('removes all listeners from page');
+    test('awaits pending network capture promises before writing');
     test('writes console.json to logs directory');
     test('writes requests.json to network directory');
     test('writes index.json to run directory');
     test('sets _initialized to false');
     test('clears page reference');
+    test('clears _pendingCaptures array');
     test('safe to call multiple times');
     test('handles page already closed gracefully');
   });
@@ -891,12 +911,14 @@ describe('EvidenceCollector', () => {
   describe('Network Event Handling', () => {
     test('captures URL, method, status for completed requests');
     test('captures duration from request timing');
+    test('calculates duration as responseEnd minus startTime');
     test('marks requests with status >= 400 as failed');
     test('captures failed requests with failure reason');
     test('redacts authorization headers');
     test('redacts cookie headers');
     test('preserves non-sensitive headers');
     test('handles missing response gracefully');
+    test('tracks pending captures and cleans up after resolution');
   });
 
   describe('_sanitizeName()', () => {
@@ -988,7 +1010,7 @@ function createMockRequest({ url = 'https://api.example.com/data', method = 'GET
     method: () => method,
     resourceType: () => resourceType,
     headers: () => ({ 'content-type': 'application/json', ...headers }),
-    timing: () => timing ?? { responseEnd: 150 },
+    timing: () => timing ?? { startTime: 0, responseEnd: 150 },
     failure: () => failure ?? null,
     response: () => Promise.resolve(null)  // Override per test
   };
@@ -1062,9 +1084,9 @@ node -e "
 
 2. **The four public API methods are locked.** `captureScreenshot(page, name)`, `getConsoleLogs()`, `getNetworkRequests()`, and `collectAll(page, stepName)` — these signatures match what BaseConnector already calls. Do not change them.
 
-3. **Playwright event listener pattern.** `page.on('console', handler)` and `page.on('requestfinished', handler)` are the standard Playwright APIs. The `_onRequestFinished` handler deals with the async response promise carefully — `request.response()` returns a Promise in some Playwright versions and a direct value in others. The implementation handles both by wrapping in `_captureRequest()`.
+3. **Playwright event listener pattern.** `page.on('console', handler)` and `page.on('requestfinished', handler)` are the standard Playwright APIs. In Playwright v1.58 (installed), `request.response()` is synchronous and returns `Response | null` directly — not a Promise. The `_onRequestFinished` handler passes this value to `_captureRequest()`, which handles the async work of extracting headers.
 
-4. **`_onRequestFinished` async subtlety.** The listener itself is synchronous (Playwright calls it synchronously), but capturing the response requires awaiting. The pattern is to call `this._captureRequest(request, responsePromise).catch(...)` — fire-and-forget with error suppression. This means network entries may arrive slightly out of order. That's acceptable.
+4. **`_onRequestFinished` async tracking.** The listener itself is synchronous (Playwright calls it synchronously), but capturing response headers requires awaiting. Each `_captureRequest()` call is tracked in `this._pendingCaptures` and cleaned up via `.finally()`. Before `cleanup()` writes files to disk, it calls `await Promise.allSettled(this._pendingCaptures)` to ensure no in-flight captures are lost. Network entries may arrive slightly out of order — that's acceptable.
 
 5. **Screenshot writes are synchronous to the test flow.** Unlike network captures, `captureScreenshot()` is awaited. This ensures the screenshot is on disk before the evidence package is returned. The test pauses briefly for I/O — this is intentional and necessary.
 
@@ -1072,9 +1094,23 @@ node -e "
 
 7. **Tests should use a temporary directory.** Use `os.tmpdir()` or a `tmp-evidence-*` directory created in `beforeAll()` and cleaned up in `afterAll()`. Never write to `./evidence/` during tests.
 
-8. **Apply the two robustness fixes from the feasibility review:**
-   - In `_onRequestFinished`: Playwright's `request.response()` may return a Promise or a direct Response depending on how it's called. Handle both cases.
-   - Consider that `request.timing()` may return `null` on some request types — default `duration` to `0` when timing is unavailable.
+8. **Timing calculation.** `request.timing()` returns timestamps, not durations. Duration is calculated as `responseEnd - startTime`. Both fields may be `-1` when unavailable — the implementation guards against this and defaults to `0`.
+
+9. **BaseConnector test mock update needed.** The existing `tests/connectors/base-connector.test.js` mock uses `screenshot` (singular, string path) for the `collectAll` return value. The real EvidenceCollector returns `screenshots` (plural, `{ full, viewport }` object). Update the BaseConnector test mock's `collectAll` return value to match:
+   ```javascript
+   collectAll: jest.fn().mockResolvedValue({
+     stepName: 'test_step',
+     timestamp: '2026-02-11T00:00:00Z',
+     screenshots: { full: '/evidence/test_step_full.png', viewport: '/evidence/test_step_viewport.png' },
+     consoleLogs: [],
+     networkRequests: [],
+     url: 'https://staging.example.com',
+     pageTitle: 'Test',
+     viewport: { width: 1280, height: 720 },
+     summary: { totalLogs: 0, errorLogs: 0, warnLogs: 0, totalRequests: 0, failedRequests: 0 }
+   })
+   ```
+   This doesn't break existing tests (since `collectAll` is fully mocked), but should be done during this implementation to prevent integration test surprises.
 
 ---
 
