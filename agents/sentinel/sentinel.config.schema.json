@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SentinelAgentConfig",
+  "description": "Configuration schema for SentinelAgent memory persistence testing. Documentation only — not enforced at runtime.",
+  "type": "object",
+  "required": ["id", "scenarios"],
+  "properties": {
+    "id": { "type": "string", "const": "sentinel", "description": "Used by getAgentId()" },
+    "description": { "type": "string" },
+    "recallThreshold": {
+      "type": "number", "minimum": 0, "maximum": 1, "default": 0.85,
+      "description": "Global default recall accuracy threshold"
+    },
+    "contradictionThreshold": {
+      "type": "number", "minimum": 0, "maximum": 1, "default": 0,
+      "description": "Global maximum allowed contradiction rate"
+    },
+    "scenarios": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/MemoryScenario" },
+      "minItems": 1
+    }
+  },
+  "definitions": {
+    "MemoryScenario": {
+      "type": "object",
+      "required": ["id", "name", "steps", "assertions"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "timeout": { "type": "number", "default": 300000 },
+        "recallThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "contradictionThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/MemoryStep" }
+        },
+        "assertions": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Scenario-level assertions evaluated after all steps complete. Custom types: recall_contains, no_contradiction, fact_present."
+        }
+      }
+    },
+    "MemoryStep": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": { "type": "string" },
+        "params": { "type": "object" },
+        "description": { "type": "string" },
+        "captureEvidence": { "type": "boolean", "default": false },
+        "phase": {
+          "type": "string",
+          "enum": ["setup", "establish", "distance", "recall"],
+          "description": "Phase annotation read by SentinelAgent. Ignored by BaseAgent."
+        },
+        "fact": {
+          "$ref": "#/definitions/FactDeclaration",
+          "description": "Fact declaration for establish-phase steps. Read by SentinelAgent. Ignored by BaseAgent."
+        }
+      }
+    },
+    "FactDeclaration": {
+      "type": "object",
+      "required": ["factId", "keywords"],
+      "properties": {
+        "factId": { "type": "string" },
+        "keywords": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "contradictions": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "category": { "type": "string", "description": "Optional grouping (character, setting, plot, worldbuilding)" }
+      }
+    }
+  }
+}
