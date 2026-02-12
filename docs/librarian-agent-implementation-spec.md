@@ -1,7 +1,9 @@
-# LibrarianAgent Implementation Spec
+# LibrarianAgent Implementation Spec (v2 — Corrected)
 
 **QA Engine — Week 2, Day 4**
 **File path:** `docs/librarian-agent-implementation-spec.md`
+
+**Corrections from v1 feasibility review:** 7 critical, 4 medium, 3 low issues fixed. See "Issue Resolution Log" at end of document.
 
 ---
 
@@ -12,6 +14,29 @@
 - Connector layer (Week 1) — `performAction()` interface, mock connector for testing
 - Error hierarchy — `AgentError → ScenarioError / AssertionError / ConfigurationError` in `agents/errors.js`
 - Mock connector — `tests/helpers/mock-connector.js`
+
+**Actual BaseAgent API (authoritative):**
+```
+constructor(config, connector)                          — store config + connector
+async initialize()                                      — hook, default no-op
+async runTests() → TestRunResult                        — FRAMEWORK, never override
+async runScenario(scenario) → ScenarioResult            — FRAMEWORK, never override
+async executeStep(step, scenarioContext) → StepResult    — calls connector.performAction(step.action, resolvedParams)
+async evaluateAssertions(assertions, ctx) → AssertionResult[]
+async evaluateAssertion(assertion, ctx) → AssertionResult — switch dispatch, override with super fallback
+async analyzeResults(testRunResult) → Analysis           — hook, default: pass/fail counts + duration
+async generateReport(analysis) → Report                  — hook, default: structured summary
+async cleanup()                                          — hook, default no-op
+resolveParams(params, ctx)                               — {{timestamp}}, {{uuid}}, {{scenarioId}}, {{stepIndex}}
+```
+
+**Key constraints from feasibility review:**
+- Every step MUST have an `action` field — BaseAgent calls `connector.performAction(step.action, ...)` on every step
+- Assertions live at `scenario.assertions` (scenario-level, evaluated after all steps) — NOT as individual steps
+- `evaluateAssertion()` returns `{ type, passed, message, expected, actual, durationMs }` — never throws
+- No `storeResult`, `contentRef`, `forEach`, or `_getCustomAssertionHandler` mechanisms exist in BaseAgent
+- `resolveParams()` only supports `{{timestamp}}`, `{{uuid}}`, `{{scenarioId}}`, `{{stepIndex}}`
+- Assertion handlers access previous step results via `scenarioContext.stepResults[index]`
 
 **What LibrarianAgent validates:**
 Brainstormy generates two types of citation-grounded documents:
@@ -27,7 +52,6 @@ Brainstormy generates two types of citation-grounded documents:
 **Connector actions LibrarianAgent will use:**
 - `generate_report` — triggers report generation, returns `{ id, content, citation_map, report_type, title }`
 - `generate_bible` — triggers bible generation, returns `{ id, sections, template_key, version }`
-- `get_citations` — extracts citation IDs from content, returns `{ citations: [{ id, claim_text, surrounding_context }] }`
 - `verify_citation` — checks a single citation against source, returns `{ valid, source_exists, supports_claim, source_content }`
 - `send_message` — sends a brainstorming message (for establishing facts before generation)
 - `wait_for_response` — waits for AI response
@@ -38,55 +62,52 @@ Brainstormy generates two types of citation-grounded documents:
 
 ## Design Decisions
 
-### D1: Four Custom Assertion Types
+### D1: Four Custom Assertion Types (via evaluateAssertion override)
 
-LibrarianAgent adds four domain-specific assertion types to BaseAgent's 10 built-in types:
+LibrarianAgent overrides `evaluateAssertion(assertion, scenarioContext)` with a switch statement + `super.evaluateAssertion()` fallback — exactly as SentinelAgent does. Each assertion returns `{ type, passed, message, expected, actual, durationMs }`.
 
-| Type | Purpose | Params | Pass Condition |
-|------|---------|--------|----------------|
-| `citation_valid` | Single citation references a real message and the source supports the claim | `{ citationId, claimText }` | `verify_citation` returns `{ valid: true, source_exists: true, supports_claim: true }` |
-| `citation_supports_claim` | Specifically checks semantic support (citation exists but does it back the claim?) | `{ citationId, claimText, strictness }` | `verify_citation` returns `supports_claim: true` at given strictness level |
-| `no_unsupported_claims` | Scans entire content for claims without citations (hallucination detection) | `{ content, citation_map, maxUnsupportedRate }` | Unsupported claim rate ≤ `maxUnsupportedRate` |
-| `all_sections_populated` | Bible-specific: all sections have real content, not "*Not yet developed*" | `{ sections, allowEmpty }` | Every section has content (or only `allowEmpty` sections are empty) |
+| Type | Purpose | Key Assertion Params | Pass Condition |
+|------|---------|---------------------|----------------|
+| `citation_accuracy` | Batch-validates all citations in a document | `{ reportStepIndex, minAccuracy }` | Extracts citations from step result, verifies each via connector, accuracy ≥ threshold |
+| `no_unsupported_claims` | Scans content for claims without citations (hallucination detection) | `{ reportStepIndex, maxUnsupportedRate }` | Unsupported claim rate ≤ threshold |
+| `all_sections_populated` | Bible-specific: all sections have real content | `{ bibleStepIndex, allowEmpty }` | Every section has content (or only `allowEmpty` sections are empty) |
+| `citation_supports_claim` | Spot-checks a specific citation's semantic support | `{ reportStepIndex, citationId, claimText, strictness }` | `verify_citation` returns `supports_claim: true` |
 
-**Rationale:** Follows SentinelAgent pattern of adding domain-specific assertion types. These four cover the complete citation validation surface: individual citation validity, semantic support checking, aggregate hallucination detection, and structural completeness.
+**Key design:** `citation_accuracy` is a *batch* assertion that internally iterates all extracted citations and calls `this.connector.performAction('verify_citation', ...)` for each one. This eliminates the need for `forEach` or dynamic step generation that BaseAgent doesn't support.
 
-### D2: Three Scenario Helper Methods
+**Rationale:** Follows SentinelAgent pattern exactly. The `reportStepIndex` / `bibleStepIndex` params let assertions find the relevant step result in `scenarioContext.stepResults` without needing `storeResult`/`contentRef` mechanisms.
 
-Following SentinelAgent's `createEstablishRecallScenario` / `createMultiFactScenario` / `createContradictionScenario` pattern:
+### D2: Scenario Helpers in Test Helper File (not on class)
 
-| Helper | Purpose | Returns |
-|--------|---------|---------|
-| `createReportCitationScenario(config)` | Establishes facts → generates report → validates all citations | Scenario JSON |
-| `createBibleCompletenessScenario(config)` | Establishes facts → generates bible → checks all sections populated with valid citations | Scenario JSON |
-| `createHallucinationDetectionScenario(config)` | Establishes minimal facts → generates report → checks for unsupported claims beyond the established content | Scenario JSON |
+Following SentinelAgent's pattern where helpers live in `tests/helpers/sentinel-helpers.js`:
 
-### D3: Accuracy Scoring with Configurable Thresholds
+| Helper | File Location | Purpose |
+|--------|---------------|---------|
+| `createReportCitationScenario(config)` | `tests/helpers/librarian-helpers.js` | Establishes facts → generates report → citation_accuracy + no_unsupported_claims assertions |
+| `createBibleCompletenessScenario(config)` | `tests/helpers/librarian-helpers.js` | Establishes facts → generates bible → all_sections_populated assertion |
+| `createHallucinationDetectionScenario(config)` | `tests/helpers/librarian-helpers.js` | Minimal facts → generates report → no_unsupported_claims with higher threshold |
 
-LibrarianAgent computes three scores during `analyzeResults()`:
+Each helper returns a complete scenario object with `{ id, name, steps[], assertions[] }` where assertions reference step indices.
 
-| Metric | Default Threshold | Description |
+### D3: Accuracy Scoring via analyzeResults(testRunResult)
+
+LibrarianAgent's `analyzeResults(testRunResult)` calls `super.analyzeResults(testRunResult)` first, then enriches by scanning `testRunResult.scenarios[].assertionResults[]` for its custom assertion types. No mutable instance state needed — all data flows through the `testRunResult` parameter.
+
+Three computed metrics with configurable thresholds:
+
+| Metric | Default Threshold | Derived From |
 |--------|-------------------|-------------|
-| `citationAccuracy` | 0.90 (90%) | Proportion of citations that are valid (source exists + supports claim) |
-| `hallucinationRate` | 0.05 (5%) | Proportion of claims with no citation support |
-| `sectionCompleteness` | 1.0 (100%) | Proportion of bible sections with real content |
-
-Thresholds are configurable per-scenario via `config.thresholds`.
+| `citationAccuracy` | 0.90 (90%) | `citation_accuracy` assertion results' `actual.accuracy` values |
+| `hallucinationRate` | 0.05 (5%) | `no_unsupported_claims` assertion results' `actual.rate` values |
+| `sectionCompleteness` | 1.0 (100%) | `all_sections_populated` assertion results' `actual.completeness` values |
 
 ### D4: Citation Extraction as Internal Utility
 
-LibrarianAgent includes a `_extractCitations(content)` method that parses `[shortId]` patterns from content and extracts the surrounding claim text. This is used internally before calling `verify_citation` on each extracted citation. The regex pattern: `/\[([a-f0-9]{8})\]/gi` — matches 8-char hex IDs in brackets.
+`_extractCitations(content)` parses `[shortId]` patterns from content. Regex: `/\[([a-f0-9]{8})\]/gi`. Used internally by `citation_accuracy` assertion before calling `verify_citation` per citation.
 
-### D5: Report Types and Bible Templates as Config
+### D5: No Constructor Override
 
-Scenario configs specify which report types and bible templates to test. Supported values come from the app's template registry:
-
-**Report types:** `outline`, `character_profile`, `world_guide` (character_profile requires `{ character_name }` param)
-**Bible templates:** `standard`, `heros_journey`, `save_the_cat`, `three_act`, `character_focused`, `world_building`
-
-### D6: Claim Extraction Strategy
-
-For `no_unsupported_claims`, the agent needs to identify "claims" in generated content. Strategy: split content into sentences, filter out structural lines (headers, blank lines, template markers), and check each remaining sentence for at least one `[shortId]` citation. Sentences without citations are flagged as potentially unsupported. The `maxUnsupportedRate` threshold accounts for legitimate uncited structural/transitional sentences.
+Following HealerAgent/SentinelAgent pattern — no constructor override. All state initialization happens in `initialize()`.
 
 ---
 
@@ -94,166 +115,139 @@ For `no_unsupported_claims`, the agent needs to identify "claims" in generated c
 
 ### Overridden from BaseAgent
 
-| Method | Purpose |
-|--------|---------|
-| `initialize()` | Validates config has `reportTypes` or `bibleTemplates`, initializes tracking structures |
-| `analyzeResults()` | Computes citationAccuracy, hallucinationRate, sectionCompleteness from scenario results |
-| `generateReport()` | Produces LibrarianAgent-specific report with citation metrics and per-document breakdowns |
+| Method | Signature | Purpose |
+|--------|-----------|---------|
+| `initialize()` | `async initialize()` | Calls `super.initialize()`, validates config has scenarios with citation/bible assertions |
+| `evaluateAssertion(assertion, scenarioContext)` | `async evaluateAssertion(assertion, ctx) → AssertionResult` | Switch on 4 custom types + `super.evaluateAssertion()` fallback |
+| `analyzeResults(testRunResult)` | `async analyzeResults(testRunResult) → LibrarianAnalysis` | Calls `super.analyzeResults(testRunResult)`, enriches with citation metrics from assertion results |
+| `generateReport(analysis)` | `async generateReport(analysis) → LibrarianReport` | Calls `super.generateReport(analysis)`, adds `librarianSummary` with per-document breakdowns |
 
-### Custom Assertion Handlers
-
-| Method | Assertion Type |
-|--------|---------------|
-| `_assertCitationValid(step, state)` | `citation_valid` |
-| `_assertCitationSupportsClaim(step, state)` | `citation_supports_claim` |
-| `_assertNoUnsupportedClaims(step, state)` | `no_unsupported_claims` |
-| `_assertAllSectionsPopulated(step, state)` | `all_sections_populated` |
-
-### Scenario Helpers (static)
-
-| Method | Creates |
-|--------|---------|
-| `static createReportCitationScenario(config)` | Report citation validation scenario |
-| `static createBibleCompletenessScenario(config)` | Bible completeness + citation scenario |
-| `static createHallucinationDetectionScenario(config)` | Hallucination detection scenario |
-
-### Internal Utilities
+### Internal Utilities (on agent class)
 
 | Method | Purpose |
 |--------|---------|
 | `_extractCitations(content)` | Parses `[shortId]` from content, returns `[{ id, claimText, position }]` |
 | `_extractClaims(content)` | Splits content into sentences, filters structural lines, returns claim strings |
-| `_computeCitationAccuracy(results)` | Aggregates per-citation validity into overall accuracy score |
-| `_computeHallucinationRate(results)` | Computes ratio of uncited claims to total claims |
-| `_computeSectionCompleteness(sections)` | Computes ratio of populated sections to total sections |
+| `_getSurroundingSentence(content, position)` | Gets sentence surrounding a character position |
+
+### Scenario Helpers (in `tests/helpers/librarian-helpers.js`)
+
+| Function | Creates |
+|----------|---------|
+| `createReportCitationScenario(config)` | Report citation validation scenario |
+| `createBibleCompletenessScenario(config)` | Bible completeness scenario |
+| `createHallucinationDetectionScenario(config)` | Hallucination detection scenario |
 
 ---
 
 ## Data Structures
 
-### CitationResult (per-citation tracking)
+### AssertionResult (returned by evaluateAssertion — all 4 types)
+
+Every custom assertion returns this shape (matching BaseAgent's contract):
 
 ```javascript
 {
-  citationId: 'abc12345',           // Short ID from content
-  claimText: 'Sarah is a marine biologist', // Surrounding claim text
-  position: 42,                     // Character position in content
-  sourceExists: true,               // Message UUID found in database
-  supportsClaim: true,              // Source content semantically supports claim
-  sourceContent: 'User: Let\'s make Sarah a marine biologist...', // Actual source
-  valid: true                       // sourceExists && supportsClaim
-}
-```
-
-### DocumentAnalysis (per-document tracking)
-
-```javascript
-{
-  documentId: 'report-123',
-  documentType: 'report',           // 'report' or 'bible'
-  reportType: 'character_profile',  // or templateKey for bibles
-  totalCitations: 15,
-  validCitations: 14,
-  invalidCitations: 1,
-  citationAccuracy: 0.933,
-  totalClaims: 22,
-  unsupportedClaims: 2,
-  hallucinationRate: 0.091,
-  sections: null,                   // Only for bibles
-  sectionCompleteness: null,        // Only for bibles
-  citationResults: [ /* CitationResult[] */ ],
-  timestamp: '2025-01-15T10:30:00Z'
-}
-```
-
-### LibrarianAnalysis (aggregate from analyzeResults)
-
-```javascript
-{
-  overallCitationAccuracy: 0.92,
-  overallHallucinationRate: 0.04,
-  overallSectionCompleteness: 1.0,
-  documentsAnalyzed: 3,
-  totalCitations: 45,
-  totalValidCitations: 41,
-  totalClaims: 68,
-  totalUnsupportedClaims: 3,
-  documentBreakdowns: [ /* DocumentAnalysis[] */ ],
-  thresholdsPassed: {
-    citationAccuracy: true,         // 0.92 >= 0.90
-    hallucinationRate: true,        // 0.04 <= 0.05
-    sectionCompleteness: true       // 1.0 >= 1.0
-  }
-}
-```
-
-### Config Shape
-
-```javascript
-// apps/brainstormy/agents/librarian.config.json
-{
-  "id": "librarian",
-  "name": "LibrarianAgent",
-  "description": "Citation accuracy and data verification",
-  "enabled": true,
-  "schedule": "daily",
-  "thresholds": {
-    "citationAccuracy": 0.90,
-    "hallucinationRate": 0.05,
-    "sectionCompleteness": 1.0
+  type: 'citation_accuracy',            // assertion type string
+  passed: true,                          // boolean
+  message: 'Citation accuracy 93.3% meets threshold 90.0%',  // human-readable
+  expected: '>= 90.0%',                 // what was expected
+  actual: {                              // structured result data
+    accuracy: 0.933,
+    total: 15,
+    valid: 14,
+    invalid: 1,
+    details: [ /* per-citation results */ ]
   },
-  "reportTypes": ["outline", "character_profile"],
-  "bibleTemplates": ["standard"],
-  "scenarios": [
+  durationMs: 1234                       // evaluation time
+}
+```
+
+### citation_accuracy — actual field detail
+
+```javascript
+{
+  accuracy: 0.933,                       // valid / total
+  total: 15,                             // total citations found
+  valid: 14,                             // citations where source exists AND supports claim
+  invalid: 1,
+  details: [
     {
-      "id": "report-citation-accuracy",
-      "name": "Report Citation Accuracy",
-      "type": "report_citation",
-      "reportType": "character_profile",
-      "reportParams": { "character_name": "Sarah" },
-      "setupMessages": [
-        { "text": "Let's create a character named Sarah who is a marine biologist" },
-        { "text": "Sarah has a fear of deep water due to a childhood incident" },
-        { "text": "She's motivated by wanting to discover a new species" },
-        { "text": "Sarah's mentor is Professor Chen who disappeared on an expedition" }
-      ],
-      "thresholds": {
-        "citationAccuracy": 0.90,
-        "hallucinationRate": 0.05
-      }
+      citationId: 'abc12345',
+      claimText: 'Sarah is a marine biologist',
+      position: 42,
+      sourceExists: true,
+      supportsClaim: true,
+      sourceContent: 'User: Let\'s make Sarah a marine biologist...',
+      valid: true
     },
     {
-      "id": "bible-completeness",
-      "name": "Bible Section Completeness",
-      "type": "bible_completeness",
-      "templateKey": "standard",
-      "setupMessages": [
-        { "text": "Our story is about a lighthouse keeper who discovers a hidden room" },
-        { "text": "The setting is 1890s New England coastal town" },
-        { "text": "The protagonist is Thomas, a retired sea captain" },
-        { "text": "The antagonist is the town mayor who has a dark secret" },
-        { "text": "There's a love interest: Clara, the local schoolteacher" },
-        { "text": "The central mystery involves missing ships and a ghost legend" }
-      ],
-      "thresholds": {
-        "sectionCompleteness": 1.0,
-        "citationAccuracy": 0.85
-      }
-    },
-    {
-      "id": "hallucination-detection",
-      "name": "Hallucination Detection",
-      "type": "hallucination_detection",
-      "reportType": "outline",
-      "setupMessages": [
-        { "text": "A story about a baker who finds a magic recipe book" }
-      ],
-      "thresholds": {
-        "hallucinationRate": 0.10
-      }
+      citationId: 'def67890',
+      claimText: 'She grew up in Portland',
+      position: 120,
+      sourceExists: false,
+      supportsClaim: false,
+      sourceContent: null,
+      valid: false
     }
+  ]
+}
+```
+
+### no_unsupported_claims — actual field detail
+
+```javascript
+{
+  rate: 0.045,                           // unsupported / total
+  totalClaims: 22,
+  unsupportedClaims: 1,
+  examples: ['She grew up in Portland and loved the ocean.']  // first 3 uncited claims
+}
+```
+
+### all_sections_populated — actual field detail
+
+```javascript
+{
+  completeness: 0.833,                   // populated / total
+  totalSections: 6,
+  populatedSections: 5,
+  emptySections: ['themes'],             // section keys with no content
+  allowedEmpty: []                       // sections allowed to be empty
+}
+```
+
+### Scenario Shape (produced by helpers)
+
+```javascript
+{
+  id: 'report-citation-character_profile',
+  name: 'Report Citation Accuracy - character_profile',
+  tags: ['citation', 'report', 'character_profile'],
+  timeout: 120000,
+  steps: [
+    { action: 'create_story', params: { name: 'Citation Test {{timestamp}}', vertical: 'novel' } },
+    { action: 'create_session', params: { type: 'brainstorm' } },
+    { action: 'send_message', params: { text: 'Let\'s create a character named Sarah...' } },
+    { action: 'wait_for_response', params: {} },
+    // ... more setup messages ...
+    { action: 'generate_report', params: { report_type: 'character_profile', character_name: 'Sarah' } }
+    //       ^ This is stepIndex 8 (for example). Assertions reference it.
   ],
-  "knownIssues": []
+  assertions: [
+    {
+      type: 'citation_accuracy',
+      reportStepIndex: 8,                // index of generate_report step
+      minAccuracy: 0.90,
+      message: 'Report citations should be >= 90% accurate'
+    },
+    {
+      type: 'no_unsupported_claims',
+      reportStepIndex: 8,
+      maxUnsupportedRate: 0.05,
+      message: 'Hallucination rate should be <= 5%'
+    }
+  ]
 }
 ```
 
@@ -266,46 +260,41 @@ For `no_unsupported_claims`, the agent needs to identify "claims" in generated c
 ```javascript
 'use strict';
 
-const BaseAgent = require('../base/agent');
-const { ConfigurationError, AssertionError } = require('../errors');
+const BaseAgent = require('../base-agent');
+const { ConfigurationError } = require('../errors');
 
 /**
  * LibrarianAgent — validates citation accuracy in reports and Story Bibles.
  *
- * Custom assertion types:
- *   - citation_valid: single citation references real message + supports claim
- *   - citation_supports_claim: semantic support check at configurable strictness
+ * Custom assertion types (via evaluateAssertion override):
+ *   - citation_accuracy: batch-validates all citations in a generated document
  *   - no_unsupported_claims: aggregate hallucination detection
  *   - all_sections_populated: bible section completeness
+ *   - citation_supports_claim: spot-check a specific citation's semantic support
  *
- * Scenario helpers:
+ * Scenario helpers in tests/helpers/librarian-helpers.js:
  *   - createReportCitationScenario(config)
  *   - createBibleCompletenessScenario(config)
  *   - createHallucinationDetectionScenario(config)
  */
 class LibrarianAgent extends BaseAgent {
-  constructor(config, connector) {
-    super(config, connector);
-    this._documentAnalyses = [];
-    this._citationResults = [];
-  }
 
   // ---------------------------------------------------------------------------
   // Lifecycle overrides
   // ---------------------------------------------------------------------------
 
   async initialize() {
-    const hasReportTypes = Array.isArray(this.config.reportTypes) && this.config.reportTypes.length > 0;
-    const hasBibleTemplates = Array.isArray(this.config.bibleTemplates) && this.config.bibleTemplates.length > 0;
-    const hasScenarios = Array.isArray(this.config.scenarios) && this.config.scenarios.length > 0;
+    await super.initialize();
 
-    if (!hasReportTypes && !hasBibleTemplates && !hasScenarios) {
+    // Validate that config has meaningful scenarios
+    const scenarios = this.getScenarios();
+    if (scenarios.length === 0) {
       throw new ConfigurationError(
-        'LibrarianAgent requires at least one of: reportTypes, bibleTemplates, or scenarios'
+        'LibrarianAgent requires at least one scenario'
       );
     }
 
-    // Validate thresholds
+    // Validate thresholds if provided
     const thresholds = this.config.thresholds || {};
     if (thresholds.citationAccuracy !== undefined &&
         (thresholds.citationAccuracy < 0 || thresholds.citationAccuracy > 1)) {
@@ -319,242 +308,214 @@ class LibrarianAgent extends BaseAgent {
         (thresholds.sectionCompleteness < 0 || thresholds.sectionCompleteness > 1)) {
       throw new ConfigurationError('sectionCompleteness threshold must be between 0 and 1');
     }
-
-    this._documentAnalyses = [];
-    this._citationResults = [];
-  }
-
-  analyzeResults() {
-    const allCitationResults = this._citationResults;
-    const documentBreakdowns = this._documentAnalyses;
-
-    const totalCitations = allCitationResults.length;
-    const validCitations = allCitationResults.filter(r => r.valid).length;
-    const overallCitationAccuracy = totalCitations > 0 ? validCitations / totalCitations : 1.0;
-
-    // Aggregate claims across all documents
-    let totalClaims = 0;
-    let totalUnsupportedClaims = 0;
-    for (const doc of documentBreakdowns) {
-      totalClaims += doc.totalClaims;
-      totalUnsupportedClaims += doc.unsupportedClaims;
-    }
-    const overallHallucinationRate = totalClaims > 0 ? totalUnsupportedClaims / totalClaims : 0;
-
-    // Section completeness (only from bible documents)
-    const bibleDocs = documentBreakdowns.filter(d => d.documentType === 'bible');
-    let overallSectionCompleteness = 1.0;
-    if (bibleDocs.length > 0) {
-      const totalSections = bibleDocs.reduce((sum, d) => sum + (d.sections || 0), 0);
-      const populatedSections = bibleDocs.reduce(
-        (sum, d) => sum + Math.round((d.sectionCompleteness || 0) * (d.sections || 0)), 0
-      );
-      overallSectionCompleteness = totalSections > 0 ? populatedSections / totalSections : 1.0;
-    }
-
-    const thresholds = this.config.thresholds || {};
-    const citAccThreshold = thresholds.citationAccuracy ?? 0.90;
-    const hallThreshold = thresholds.hallucinationRate ?? 0.05;
-    const secCompThreshold = thresholds.sectionCompleteness ?? 1.0;
-
-    this._analysis = {
-      overallCitationAccuracy,
-      overallHallucinationRate,
-      overallSectionCompleteness,
-      documentsAnalyzed: documentBreakdowns.length,
-      totalCitations,
-      totalValidCitations: validCitations,
-      totalClaims,
-      totalUnsupportedClaims,
-      documentBreakdowns,
-      thresholdsPassed: {
-        citationAccuracy: overallCitationAccuracy >= citAccThreshold,
-        hallucinationRate: overallHallucinationRate <= hallThreshold,
-        sectionCompleteness: overallSectionCompleteness >= secCompThreshold
-      }
-    };
-
-    return this._analysis;
-  }
-
-  generateReport() {
-    const analysis = this._analysis;
-    if (!analysis) {
-      return {
-        agent: 'librarian',
-        status: 'no_analysis',
-        message: 'analyzeResults() has not been called'
-      };
-    }
-
-    const allPassed = Object.values(analysis.thresholdsPassed).every(v => v);
-
-    return {
-      agent: 'librarian',
-      status: allPassed ? 'passed' : 'failed',
-      summary: {
-        citationAccuracy: `${(analysis.overallCitationAccuracy * 100).toFixed(1)}%`,
-        hallucinationRate: `${(analysis.overallHallucinationRate * 100).toFixed(1)}%`,
-        sectionCompleteness: `${(analysis.overallSectionCompleteness * 100).toFixed(1)}%`,
-        documentsAnalyzed: analysis.documentsAnalyzed,
-        totalCitations: analysis.totalCitations,
-        validCitations: analysis.totalValidCitations
-      },
-      thresholdsPassed: analysis.thresholdsPassed,
-      documents: analysis.documentBreakdowns.map(doc => ({
-        documentId: doc.documentId,
-        documentType: doc.documentType,
-        reportType: doc.reportType,
-        citationAccuracy: `${(doc.citationAccuracy * 100).toFixed(1)}%`,
-        hallucinationRate: `${(doc.hallucinationRate * 100).toFixed(1)}%`,
-        totalCitations: doc.totalCitations,
-        validCitations: doc.validCitations,
-        invalidCitations: doc.invalidCitations,
-        sectionCompleteness: doc.sectionCompleteness !== null
-          ? `${(doc.sectionCompleteness * 100).toFixed(1)}%`
-          : null
-      })),
-      failedCitations: analysis.documentBreakdowns.flatMap(doc =>
-        (doc.citationResults || []).filter(c => !c.valid).map(c => ({
-          documentId: doc.documentId,
-          citationId: c.citationId,
-          claimText: c.claimText,
-          sourceExists: c.sourceExists,
-          supportsClaim: c.supportsClaim
-        }))
-      )
-    };
   }
 
   // ---------------------------------------------------------------------------
-  // Custom assertion type handlers
+  // Custom assertion dispatch (override with super fallback)
+  // ---------------------------------------------------------------------------
+
+  async evaluateAssertion(assertion, scenarioContext) {
+    const startTime = Date.now();
+
+    switch (assertion.type) {
+
+      case 'citation_accuracy': {
+        return await this._evaluateCitationAccuracy(assertion, scenarioContext, startTime);
+      }
+
+      case 'no_unsupported_claims': {
+        return this._evaluateNoUnsupportedClaims(assertion, scenarioContext, startTime);
+      }
+
+      case 'all_sections_populated': {
+        return this._evaluateAllSectionsPopulated(assertion, scenarioContext, startTime);
+      }
+
+      case 'citation_supports_claim': {
+        return await this._evaluateCitationSupportsClaim(assertion, scenarioContext, startTime);
+      }
+
+      default:
+        return super.evaluateAssertion(assertion, scenarioContext);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Assertion handlers — each returns { type, passed, message, expected, actual, durationMs }
   // ---------------------------------------------------------------------------
 
   /**
-   * Registered in _getCustomAssertionHandler (called by BaseAgent).
+   * Batch-validates all citations in a generated document.
+   * Extracts citations from step result content, verifies each via connector.
    */
-  _getCustomAssertionHandler(assertionType) {
-    switch (assertionType) {
-      case 'citation_valid':
-        return this._assertCitationValid.bind(this);
-      case 'citation_supports_claim':
-        return this._assertCitationSupportsClaim.bind(this);
-      case 'no_unsupported_claims':
-        return this._assertNoUnsupportedClaims.bind(this);
-      case 'all_sections_populated':
-        return this._assertAllSectionsPopulated.bind(this);
-      default:
-        return null;
-    }
-  }
+  async _evaluateCitationAccuracy(assertion, scenarioContext, startTime) {
+    const { reportStepIndex, minAccuracy = 0.90 } = assertion;
+    const stepResult = scenarioContext.stepResults[reportStepIndex];
 
-  async _assertCitationValid(step, state) {
-    const { citationId, claimText } = step.assertion;
-    if (!citationId) {
-      throw new AssertionError('citation_valid requires citationId');
+    if (!stepResult || stepResult.status === 'failed') {
+      return {
+        type: 'citation_accuracy',
+        passed: false,
+        message: `Cannot evaluate citations: step ${reportStepIndex} failed or missing`,
+        expected: `step ${reportStepIndex} succeeded with report content`,
+        actual: stepResult ? stepResult.status : 'missing',
+        durationMs: Date.now() - startTime
+      };
     }
 
-    const result = await this.connector.performAction('verify_citation', {
-      citationId,
-      claimText: claimText || ''
-    });
-
-    const citationResult = {
-      citationId,
-      claimText: claimText || '',
-      position: step.assertion.position || 0,
-      sourceExists: result.source_exists,
-      supportsClaim: result.supports_claim,
-      sourceContent: result.source_content || null,
-      valid: result.valid
-    };
-
-    this._citationResults.push(citationResult);
-
-    if (!result.valid) {
-      const reasons = [];
-      if (!result.source_exists) reasons.push('source message not found');
-      if (!result.supports_claim) reasons.push('source does not support claim');
-      throw new AssertionError(
-        `Citation [${citationId}] invalid: ${reasons.join(', ')}. ` +
-        `Claim: "${(claimText || '').substring(0, 80)}"`
-      );
-    }
-  }
-
-  async _assertCitationSupportsClaim(step, state) {
-    const { citationId, claimText, strictness } = step.assertion;
-    if (!citationId || !claimText) {
-      throw new AssertionError('citation_supports_claim requires citationId and claimText');
-    }
-
-    const result = await this.connector.performAction('verify_citation', {
-      citationId,
-      claimText,
-      strictness: strictness || 'normal' // 'normal' | 'strict' | 'loose'
-    });
-
-    if (!result.supports_claim) {
-      throw new AssertionError(
-        `Citation [${citationId}] does not support claim at ${strictness || 'normal'} strictness. ` +
-        `Claim: "${claimText.substring(0, 80)}". ` +
-        `Source: "${(result.source_content || '').substring(0, 80)}"`
-      );
-    }
-  }
-
-  async _assertNoUnsupportedClaims(step, state) {
-    const { content, citationMap, maxUnsupportedRate } = step.assertion;
-    if (!content) {
-      throw new AssertionError('no_unsupported_claims requires content');
-    }
-
-    const maxRate = maxUnsupportedRate ?? 0.05;
-    const claims = this._extractClaims(content);
+    const content = stepResult.result?.content || '';
     const citations = this._extractCitations(content);
 
-    // Build set of positions that have citations
-    const citedPositions = new Set();
+    if (citations.length === 0) {
+      return {
+        type: 'citation_accuracy',
+        passed: false,
+        message: 'No citations found in generated content',
+        expected: `>= 1 citation with accuracy >= ${(minAccuracy * 100).toFixed(1)}%`,
+        actual: { accuracy: 0, total: 0, valid: 0, invalid: 0, details: [] },
+        durationMs: Date.now() - startTime
+      };
+    }
+
+    // Verify each citation via connector
+    const details = [];
     for (const citation of citations) {
-      // Mark the sentence containing this citation as cited
-      citedPositions.add(citation.claimText);
+      try {
+        const verification = await this.connector.performAction('verify_citation', {
+          citationId: citation.id,
+          claimText: citation.claimText
+        });
+        details.push({
+          citationId: citation.id,
+          claimText: citation.claimText,
+          position: citation.position,
+          sourceExists: verification.source_exists,
+          supportsClaim: verification.supports_claim,
+          sourceContent: verification.source_content || null,
+          valid: verification.valid
+        });
+      } catch (err) {
+        details.push({
+          citationId: citation.id,
+          claimText: citation.claimText,
+          position: citation.position,
+          sourceExists: false,
+          supportsClaim: false,
+          sourceContent: null,
+          valid: false
+        });
+      }
+    }
+
+    const valid = details.filter(d => d.valid).length;
+    const accuracy = details.length > 0 ? valid / details.length : 0;
+    const passed = accuracy >= minAccuracy;
+
+    return {
+      type: 'citation_accuracy',
+      passed,
+      message: passed
+        ? `Citation accuracy ${(accuracy * 100).toFixed(1)}% meets threshold ${(minAccuracy * 100).toFixed(1)}%`
+        : `Citation accuracy ${(accuracy * 100).toFixed(1)}% below threshold ${(minAccuracy * 100).toFixed(1)}%`,
+      expected: `>= ${(minAccuracy * 100).toFixed(1)}%`,
+      actual: {
+        accuracy,
+        total: details.length,
+        valid,
+        invalid: details.length - valid,
+        details
+      },
+      durationMs: Date.now() - startTime
+    };
+  }
+
+  /**
+   * Scans content for claims without citations (hallucination detection).
+   */
+  _evaluateNoUnsupportedClaims(assertion, scenarioContext, startTime) {
+    const { reportStepIndex, maxUnsupportedRate = 0.05 } = assertion;
+    const stepResult = scenarioContext.stepResults[reportStepIndex];
+
+    if (!stepResult || stepResult.status === 'failed') {
+      return {
+        type: 'no_unsupported_claims',
+        passed: false,
+        message: `Cannot evaluate claims: step ${reportStepIndex} failed or missing`,
+        expected: `step ${reportStepIndex} succeeded with content`,
+        actual: stepResult ? stepResult.status : 'missing',
+        durationMs: Date.now() - startTime
+      };
+    }
+
+    const content = stepResult.result?.content || '';
+    const claims = this._extractClaims(content);
+
+    if (claims.length === 0) {
+      return {
+        type: 'no_unsupported_claims',
+        passed: true,
+        message: 'No claims found in content (nothing to check)',
+        expected: `unsupported rate <= ${(maxUnsupportedRate * 100).toFixed(1)}%`,
+        actual: { rate: 0, totalClaims: 0, unsupportedClaims: 0, examples: [] },
+        durationMs: Date.now() - startTime
+      };
     }
 
     // Find claims without any citation
-    const unsupportedClaims = claims.filter(claim => {
-      // Check if this claim sentence contains any citation ID
-      const hasCitation = /\[[a-f0-9]{8}\]/i.test(claim);
-      return !hasCitation;
-    });
+    const unsupportedClaims = claims.filter(claim => !/\[[a-f0-9]{8}\]/i.test(claim));
+    const rate = unsupportedClaims.length / claims.length;
+    const passed = rate <= maxUnsupportedRate;
 
-    const totalClaims = claims.length;
-    const unsupportedCount = unsupportedClaims.length;
-    const rate = totalClaims > 0 ? unsupportedCount / totalClaims : 0;
-
-    // Track for analysis
-    const docAnalysis = this._findOrCreateDocAnalysis(step);
-    docAnalysis.totalClaims = totalClaims;
-    docAnalysis.unsupportedClaims = unsupportedCount;
-    docAnalysis.hallucinationRate = rate;
-
-    if (rate > maxRate) {
-      throw new AssertionError(
-        `Unsupported claim rate ${(rate * 100).toFixed(1)}% exceeds max ${(maxRate * 100).toFixed(1)}%. ` +
-        `${unsupportedCount}/${totalClaims} claims lack citations. ` +
-        `Examples: ${unsupportedClaims.slice(0, 3).map(c => `"${c.substring(0, 60)}"`).join(', ')}`
-      );
-    }
+    return {
+      type: 'no_unsupported_claims',
+      passed,
+      message: passed
+        ? `Unsupported claim rate ${(rate * 100).toFixed(1)}% within threshold ${(maxUnsupportedRate * 100).toFixed(1)}%`
+        : `Unsupported claim rate ${(rate * 100).toFixed(1)}% exceeds threshold ${(maxUnsupportedRate * 100).toFixed(1)}%`,
+      expected: `<= ${(maxUnsupportedRate * 100).toFixed(1)}%`,
+      actual: {
+        rate,
+        totalClaims: claims.length,
+        unsupportedClaims: unsupportedClaims.length,
+        examples: unsupportedClaims.slice(0, 3).map(c => c.substring(0, 80))
+      },
+      durationMs: Date.now() - startTime
+    };
   }
 
-  _assertAllSectionsPopulated(step, state) {
-    const { sections, allowEmpty } = step.assertion;
-    if (!sections || typeof sections !== 'object') {
-      throw new AssertionError('all_sections_populated requires sections object');
+  /**
+   * Bible-specific: checks all sections have real content.
+   */
+  _evaluateAllSectionsPopulated(assertion, scenarioContext, startTime) {
+    const { bibleStepIndex, allowEmpty = [] } = assertion;
+    const stepResult = scenarioContext.stepResults[bibleStepIndex];
+
+    if (!stepResult || stepResult.status === 'failed') {
+      return {
+        type: 'all_sections_populated',
+        passed: false,
+        message: `Cannot evaluate sections: step ${bibleStepIndex} failed or missing`,
+        expected: `step ${bibleStepIndex} succeeded with bible sections`,
+        actual: stepResult ? stepResult.status : 'missing',
+        durationMs: Date.now() - startTime
+      };
     }
 
-    const allowedEmpty = new Set(allowEmpty || []);
+    const sections = stepResult.result?.sections;
+    if (!sections || typeof sections !== 'object') {
+      return {
+        type: 'all_sections_populated',
+        passed: false,
+        message: 'No sections object found in bible step result',
+        expected: 'sections object with content',
+        actual: typeof sections,
+        durationMs: Date.now() - startTime
+      };
+    }
+
+    const allowedEmpty = new Set(allowEmpty);
     const sectionKeys = Object.keys(sections);
-    const emptyKeys = [];
+    const emptySections = [];
 
     for (const key of sectionKeys) {
       const content = sections[key];
@@ -563,25 +524,201 @@ class LibrarianAgent extends BaseAgent {
         content.trim() === '';
 
       if (isEmpty && !allowedEmpty.has(key)) {
-        emptyKeys.push(key);
+        emptySections.push(key);
       }
     }
 
     const totalSections = sectionKeys.length;
-    const populatedSections = totalSections - emptyKeys.length;
+    const populatedSections = totalSections - emptySections.length;
     const completeness = totalSections > 0 ? populatedSections / totalSections : 1.0;
+    const passed = emptySections.length === 0;
 
-    // Track for analysis
-    const docAnalysis = this._findOrCreateDocAnalysis(step);
-    docAnalysis.sections = totalSections;
-    docAnalysis.sectionCompleteness = completeness;
+    return {
+      type: 'all_sections_populated',
+      passed,
+      message: passed
+        ? `All ${totalSections} sections populated`
+        : `${emptySections.length}/${totalSections} sections empty: ${emptySections.join(', ')}`,
+      expected: 'all sections populated',
+      actual: {
+        completeness,
+        totalSections,
+        populatedSections,
+        emptySections,
+        allowedEmpty: allowEmpty
+      },
+      durationMs: Date.now() - startTime
+    };
+  }
 
-    if (emptyKeys.length > 0) {
-      throw new AssertionError(
-        `${emptyKeys.length}/${totalSections} sections not populated: ${emptyKeys.join(', ')}. ` +
-        `Completeness: ${(completeness * 100).toFixed(1)}%`
-      );
+  /**
+   * Spot-checks a specific citation's semantic support.
+   */
+  async _evaluateCitationSupportsClaim(assertion, scenarioContext, startTime) {
+    const { citationId, claimText, strictness = 'normal' } = assertion;
+
+    if (!citationId || !claimText) {
+      return {
+        type: 'citation_supports_claim',
+        passed: false,
+        message: 'citation_supports_claim requires citationId and claimText',
+        expected: 'citationId and claimText provided',
+        actual: `citationId=${citationId}, claimText=${claimText ? 'present' : 'missing'}`,
+        durationMs: Date.now() - startTime
+      };
     }
+
+    try {
+      const result = await this.connector.performAction('verify_citation', {
+        citationId,
+        claimText,
+        strictness
+      });
+
+      const passed = result.supports_claim === true;
+
+      return {
+        type: 'citation_supports_claim',
+        passed,
+        message: passed
+          ? `Citation [${citationId}] supports claim at ${strictness} strictness`
+          : `Citation [${citationId}] does not support claim at ${strictness} strictness`,
+        expected: `supports_claim = true (strictness: ${strictness})`,
+        actual: {
+          citationId,
+          supportsClaim: result.supports_claim,
+          sourceExists: result.source_exists,
+          sourceContent: (result.source_content || '').substring(0, 100)
+        },
+        durationMs: Date.now() - startTime
+      };
+    } catch (err) {
+      return {
+        type: 'citation_supports_claim',
+        passed: false,
+        message: `verify_citation failed: ${err.message}`,
+        expected: 'verify_citation succeeds',
+        actual: err.message,
+        durationMs: Date.now() - startTime
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // analyzeResults + generateReport (async, with super calls)
+  // ---------------------------------------------------------------------------
+
+  async analyzeResults(testRunResult) {
+    const baseAnalysis = await super.analyzeResults(testRunResult);
+
+    // Collect all custom assertion results from scenarios
+    const citationAccResults = [];
+    const hallucinationResults = [];
+    const completenessResults = [];
+
+    for (const scenario of (testRunResult.scenarios || [])) {
+      for (const ar of (scenario.assertionResults || [])) {
+        switch (ar.type) {
+          case 'citation_accuracy':
+            citationAccResults.push(ar);
+            break;
+          case 'no_unsupported_claims':
+            hallucinationResults.push(ar);
+            break;
+          case 'all_sections_populated':
+            completenessResults.push(ar);
+            break;
+        }
+      }
+    }
+
+    // Compute aggregate citation accuracy
+    let totalCitations = 0;
+    let totalValid = 0;
+    for (const ar of citationAccResults) {
+      if (ar.actual && typeof ar.actual === 'object') {
+        totalCitations += ar.actual.total || 0;
+        totalValid += ar.actual.valid || 0;
+      }
+    }
+    const overallCitationAccuracy = totalCitations > 0 ? totalValid / totalCitations : 1.0;
+
+    // Compute aggregate hallucination rate
+    let totalClaims = 0;
+    let totalUnsupported = 0;
+    for (const ar of hallucinationResults) {
+      if (ar.actual && typeof ar.actual === 'object') {
+        totalClaims += ar.actual.totalClaims || 0;
+        totalUnsupported += ar.actual.unsupportedClaims || 0;
+      }
+    }
+    const overallHallucinationRate = totalClaims > 0 ? totalUnsupported / totalClaims : 0;
+
+    // Compute aggregate section completeness
+    let totalSections = 0;
+    let totalPopulated = 0;
+    for (const ar of completenessResults) {
+      if (ar.actual && typeof ar.actual === 'object') {
+        totalSections += ar.actual.totalSections || 0;
+        totalPopulated += ar.actual.populatedSections || 0;
+      }
+    }
+    const overallSectionCompleteness = totalSections > 0 ? totalPopulated / totalSections : 1.0;
+
+    // Threshold checks
+    const thresholds = this.config.thresholds || {};
+    const citAccThreshold = thresholds.citationAccuracy ?? 0.90;
+    const hallThreshold = thresholds.hallucinationRate ?? 0.05;
+    const secCompThreshold = thresholds.sectionCompleteness ?? 1.0;
+
+    return {
+      ...baseAnalysis,
+      librarian: {
+        overallCitationAccuracy,
+        overallHallucinationRate,
+        overallSectionCompleteness,
+        totalCitations,
+        totalValidCitations: totalValid,
+        totalClaims,
+        totalUnsupportedClaims: totalUnsupported,
+        totalSections,
+        totalPopulatedSections: totalPopulated,
+        thresholdsPassed: {
+          citationAccuracy: overallCitationAccuracy >= citAccThreshold,
+          hallucinationRate: overallHallucinationRate <= hallThreshold,
+          sectionCompleteness: overallSectionCompleteness >= secCompThreshold
+        },
+        assertionCounts: {
+          citationAccuracy: citationAccResults.length,
+          hallucinationDetection: hallucinationResults.length,
+          sectionCompleteness: completenessResults.length
+        }
+      }
+    };
+  }
+
+  async generateReport(analysis) {
+    const baseReport = await super.generateReport(analysis);
+    const lib = analysis.librarian || {};
+
+    const allPassed = lib.thresholdsPassed
+      ? Object.values(lib.thresholdsPassed).every(v => v)
+      : true;
+
+    return {
+      ...baseReport,
+      librarianSummary: {
+        status: allPassed ? 'passed' : 'failed',
+        citationAccuracy: `${((lib.overallCitationAccuracy || 0) * 100).toFixed(1)}%`,
+        hallucinationRate: `${((lib.overallHallucinationRate || 0) * 100).toFixed(1)}%`,
+        sectionCompleteness: `${((lib.overallSectionCompleteness || 0) * 100).toFixed(1)}%`,
+        totalCitations: lib.totalCitations || 0,
+        validCitations: lib.totalValidCitations || 0,
+        totalClaims: lib.totalClaims || 0,
+        unsupportedClaims: lib.totalUnsupportedClaims || 0,
+        thresholdsPassed: lib.thresholdsPassed || {}
+      }
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -590,9 +727,11 @@ class LibrarianAgent extends BaseAgent {
 
   /**
    * Extract citations from content. Matches [8-char-hex-id] pattern.
-   * Returns array of { id, claimText, position }.
+   * @param {string} content - Document content
+   * @returns {Array<{id: string, claimText: string, position: number}>}
    */
   _extractCitations(content) {
+    if (!content) return [];
     const regex = /\[([a-f0-9]{8})\]/gi;
     const results = [];
     let match;
@@ -612,7 +751,9 @@ class LibrarianAgent extends BaseAgent {
 
   /**
    * Extract claim sentences from content.
-   * Filters out headers, blank lines, and template markers.
+   * Filters out headers, blank lines, template markers, and short fragments.
+   * @param {string} content - Document content
+   * @returns {string[]} Claim sentences
    */
   _extractClaims(content) {
     if (!content) return [];
@@ -625,22 +766,17 @@ class LibrarianAgent extends BaseAgent {
 
       // Skip empty lines
       if (!trimmed) continue;
-
       // Skip markdown headers
       if (/^#{1,6}\s/.test(trimmed)) continue;
-
       // Skip template markers
       if (trimmed === '*Not yet developed*') continue;
-
       // Skip horizontal rules
       if (/^[-*_]{3,}$/.test(trimmed)) continue;
-
-      // Skip lines that are just formatting (bold headers, etc)
+      // Skip lines that are just bold headers
       if (/^\*\*[^*]+\*\*$/.test(trimmed)) continue;
 
-      // Split line into sentences
+      // Split line into sentences, keep those > 10 chars
       const sentences = trimmed.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 10);
-
       for (const sentence of sentences) {
         claims.push(sentence.trim());
       }
@@ -650,12 +786,16 @@ class LibrarianAgent extends BaseAgent {
   }
 
   /**
-   * Get the sentence surrounding a position in text.
+   * Get the sentence surrounding a character position in text.
+   * @param {string} content - Full text
+   * @param {number} position - Character position of citation
+   * @returns {string} Surrounding sentence
    */
   _getSurroundingSentence(content, position) {
-    // Find sentence boundaries around position
-    const before = content.substring(Math.max(0, position - 200), position);
-    const after = content.substring(position, Math.min(content.length, position + 200));
+    const lookback = 200;
+    const lookahead = 200;
+    const before = content.substring(Math.max(0, position - lookback), position);
+    const after = content.substring(position, Math.min(content.length, position + lookahead));
 
     const sentenceStart = before.lastIndexOf('.') !== -1
       ? before.lastIndexOf('.') + 1
@@ -664,413 +804,362 @@ class LibrarianAgent extends BaseAgent {
       ? after.indexOf('.') + 1
       : after.length;
 
-    const startPos = Math.max(0, position - 200) + sentenceStart;
+    const startPos = Math.max(0, position - lookback) + sentenceStart;
     const endPos = position + sentenceEnd;
 
     return content.substring(startPos, endPos).trim();
-  }
-
-  /**
-   * Find or create a DocumentAnalysis entry for the current step's document.
-   */
-  _findOrCreateDocAnalysis(step) {
-    const docId = step.assertion.documentId || step.id || 'unknown';
-    let existing = this._documentAnalyses.find(d => d.documentId === docId);
-    if (!existing) {
-      existing = {
-        documentId: docId,
-        documentType: step.assertion.documentType || 'report',
-        reportType: step.assertion.reportType || null,
-        totalCitations: 0,
-        validCitations: 0,
-        invalidCitations: 0,
-        citationAccuracy: 0,
-        totalClaims: 0,
-        unsupportedClaims: 0,
-        hallucinationRate: 0,
-        sections: null,
-        sectionCompleteness: null,
-        citationResults: [],
-        timestamp: new Date().toISOString()
-      };
-      this._documentAnalyses.push(existing);
-    }
-    return existing;
-  }
-
-  /**
-   * Compute citation accuracy for a single document.
-   * Called after all citation_valid assertions for that document.
-   */
-  _computeDocumentCitationAccuracy(documentId) {
-    const doc = this._documentAnalyses.find(d => d.documentId === documentId);
-    if (!doc) return;
-
-    const docCitations = this._citationResults.filter(
-      c => doc.citationResults.some(dc => dc.citationId === c.citationId)
-    );
-
-    doc.totalCitations = docCitations.length;
-    doc.validCitations = docCitations.filter(c => c.valid).length;
-    doc.invalidCitations = doc.totalCitations - doc.validCitations;
-    doc.citationAccuracy = doc.totalCitations > 0
-      ? doc.validCitations / doc.totalCitations
-      : 1.0;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Scenario helpers (static)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Creates a scenario that: establishes facts → generates report → validates all citations.
-   *
-   * @param {Object} config
-   * @param {string} config.reportType - 'outline', 'character_profile', etc.
-   * @param {Object} [config.reportParams] - Report-specific params (e.g., { character_name })
-   * @param {Array<{text: string}>} config.setupMessages - Messages to establish facts
-   * @param {Object} [config.thresholds] - Override default thresholds
-   * @returns {Object} Scenario JSON
-   */
-  static createReportCitationScenario(config) {
-    const {
-      reportType,
-      reportParams = {},
-      setupMessages = [],
-      thresholds = {}
-    } = config;
-
-    if (!reportType) {
-      throw new ConfigurationError('createReportCitationScenario requires reportType');
-    }
-    if (setupMessages.length === 0) {
-      throw new ConfigurationError('createReportCitationScenario requires at least one setupMessage');
-    }
-
-    const scenarioId = `report-citation-${reportType}-${Date.now()}`;
-    const steps = [];
-    let stepIdx = 0;
-
-    // Step 1: Create story
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'create_story',
-      params: { name: `Citation Test - ${reportType}`, vertical: 'novel' }
-    });
-
-    // Step 2: Create session
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'create_session',
-      params: { type: 'brainstorm' }
-    });
-
-    // Steps 3-N: Send setup messages (establish facts)
-    for (const msg of setupMessages) {
-      steps.push({
-        id: `${scenarioId}-step-${stepIdx++}`,
-        action: 'send_message',
-        params: { text: msg.text }
-      });
-      steps.push({
-        id: `${scenarioId}-step-${stepIdx++}`,
-        action: 'wait_for_response',
-        params: {}
-      });
-    }
-
-    // Step N+1: Generate report
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'generate_report',
-      params: { report_type: reportType, ...reportParams },
-      storeResult: 'generatedReport'
-    });
-
-    // Step N+2: Get citations from report
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'get_citations',
-      params: { contentRef: 'generatedReport.content' },
-      storeResult: 'extractedCitations'
-    });
-
-    // Step N+3: Validate no unsupported claims
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      assertion: {
-        type: 'no_unsupported_claims',
-        contentRef: 'generatedReport.content',
-        citationMapRef: 'generatedReport.citation_map',
-        maxUnsupportedRate: thresholds.hallucinationRate ?? 0.05,
-        documentId: scenarioId,
-        documentType: 'report',
-        reportType
-      }
-    });
-
-    // Step N+4: Verify each citation (dynamic — handled by forEach in runner)
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      forEach: 'extractedCitations.citations',
-      assertion: {
-        type: 'citation_valid',
-        citationIdRef: 'item.id',
-        claimTextRef: 'item.claim_text',
-        documentId: scenarioId,
-        documentType: 'report',
-        reportType
-      }
-    });
-
-    return {
-      id: scenarioId,
-      name: `Report Citation Accuracy - ${reportType}`,
-      type: 'report_citation',
-      steps,
-      thresholds: {
-        citationAccuracy: thresholds.citationAccuracy ?? 0.90,
-        hallucinationRate: thresholds.hallucinationRate ?? 0.05
-      }
-    };
-  }
-
-  /**
-   * Creates a scenario that: establishes facts → generates bible → checks sections + citations.
-   *
-   * @param {Object} config
-   * @param {string} config.templateKey - 'standard', 'heros_journey', etc.
-   * @param {Array<{text: string}>} config.setupMessages - Messages to establish facts
-   * @param {Array<string>} [config.allowEmpty] - Section keys allowed to be empty
-   * @param {Object} [config.thresholds] - Override default thresholds
-   * @returns {Object} Scenario JSON
-   */
-  static createBibleCompletenessScenario(config) {
-    const {
-      templateKey,
-      setupMessages = [],
-      allowEmpty = [],
-      thresholds = {}
-    } = config;
-
-    if (!templateKey) {
-      throw new ConfigurationError('createBibleCompletenessScenario requires templateKey');
-    }
-    if (setupMessages.length === 0) {
-      throw new ConfigurationError('createBibleCompletenessScenario requires at least one setupMessage');
-    }
-
-    const scenarioId = `bible-completeness-${templateKey}-${Date.now()}`;
-    const steps = [];
-    let stepIdx = 0;
-
-    // Create story
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'create_story',
-      params: { name: `Bible Test - ${templateKey}`, vertical: 'novel' }
-    });
-
-    // Create session
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'create_session',
-      params: { type: 'brainstorm' }
-    });
-
-    // Send setup messages
-    for (const msg of setupMessages) {
-      steps.push({
-        id: `${scenarioId}-step-${stepIdx++}`,
-        action: 'send_message',
-        params: { text: msg.text }
-      });
-      steps.push({
-        id: `${scenarioId}-step-${stepIdx++}`,
-        action: 'wait_for_response',
-        params: {}
-      });
-    }
-
-    // Generate bible
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'generate_bible',
-      params: { template_key: templateKey },
-      storeResult: 'generatedBible'
-    });
-
-    // Check all sections populated
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      assertion: {
-        type: 'all_sections_populated',
-        sectionsRef: 'generatedBible.sections',
-        allowEmpty,
-        documentId: scenarioId,
-        documentType: 'bible',
-        reportType: templateKey
-      }
-    });
-
-    return {
-      id: scenarioId,
-      name: `Bible Completeness - ${templateKey}`,
-      type: 'bible_completeness',
-      steps,
-      thresholds: {
-        sectionCompleteness: thresholds.sectionCompleteness ?? 1.0,
-        citationAccuracy: thresholds.citationAccuracy ?? 0.85
-      }
-    };
-  }
-
-  /**
-   * Creates a scenario with minimal facts to detect hallucination in generated content.
-   *
-   * @param {Object} config
-   * @param {string} config.reportType - Report type to generate
-   * @param {Object} [config.reportParams] - Report-specific params
-   * @param {Array<{text: string}>} config.setupMessages - Minimal messages (fewer = more hallucination-prone)
-   * @param {Object} [config.thresholds] - Override default thresholds
-   * @returns {Object} Scenario JSON
-   */
-  static createHallucinationDetectionScenario(config) {
-    const {
-      reportType,
-      reportParams = {},
-      setupMessages = [],
-      thresholds = {}
-    } = config;
-
-    if (!reportType) {
-      throw new ConfigurationError('createHallucinationDetectionScenario requires reportType');
-    }
-    if (setupMessages.length === 0) {
-      throw new ConfigurationError('createHallucinationDetectionScenario requires at least one setupMessage');
-    }
-
-    const scenarioId = `hallucination-${reportType}-${Date.now()}`;
-    const steps = [];
-    let stepIdx = 0;
-
-    // Create story
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'create_story',
-      params: { name: `Hallucination Test - ${reportType}`, vertical: 'novel' }
-    });
-
-    // Create session
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'create_session',
-      params: { type: 'brainstorm' }
-    });
-
-    // Send minimal setup messages
-    for (const msg of setupMessages) {
-      steps.push({
-        id: `${scenarioId}-step-${stepIdx++}`,
-        action: 'send_message',
-        params: { text: msg.text }
-      });
-      steps.push({
-        id: `${scenarioId}-step-${stepIdx++}`,
-        action: 'wait_for_response',
-        params: {}
-      });
-    }
-
-    // Generate report
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      action: 'generate_report',
-      params: { report_type: reportType, ...reportParams },
-      storeResult: 'generatedReport'
-    });
-
-    // Check for hallucinations (with higher allowed rate since fewer facts established)
-    steps.push({
-      id: `${scenarioId}-step-${stepIdx++}`,
-      assertion: {
-        type: 'no_unsupported_claims',
-        contentRef: 'generatedReport.content',
-        citationMapRef: 'generatedReport.citation_map',
-        maxUnsupportedRate: thresholds.hallucinationRate ?? 0.10,
-        documentId: scenarioId,
-        documentType: 'report',
-        reportType
-      }
-    });
-
-    return {
-      id: scenarioId,
-      name: `Hallucination Detection - ${reportType}`,
-      type: 'hallucination_detection',
-      steps,
-      thresholds: {
-        hallucinationRate: thresholds.hallucinationRate ?? 0.10
-      }
-    };
   }
 }
 
 module.exports = LibrarianAgent;
 ```
 
+### `tests/helpers/librarian-helpers.js`
+
+```javascript
+'use strict';
+
+const { ConfigurationError } = require('../../agents/errors');
+
+/**
+ * Scenario helpers for LibrarianAgent tests.
+ * Follows same pattern as tests/helpers/sentinel-helpers.js.
+ */
+
+/**
+ * Creates a scenario that: establishes facts → generates report → validates citations.
+ *
+ * @param {Object} config
+ * @param {string} config.reportType - 'outline', 'character_profile', etc.
+ * @param {Object} [config.reportParams] - Report-specific params (e.g., { character_name })
+ * @param {Array<{text: string}>} config.setupMessages - Messages to establish facts
+ * @param {Object} [config.thresholds] - Override default thresholds
+ * @returns {Object} Scenario with steps[] and assertions[]
+ */
+function createReportCitationScenario(config) {
+  const {
+    reportType,
+    reportParams = {},
+    setupMessages = [],
+    thresholds = {}
+  } = config;
+
+  if (!reportType) {
+    throw new ConfigurationError('createReportCitationScenario requires reportType');
+  }
+  if (setupMessages.length === 0) {
+    throw new ConfigurationError('createReportCitationScenario requires at least one setupMessage');
+  }
+
+  const steps = [];
+
+  // Create story + session
+  steps.push({ action: 'create_story', params: { name: 'Citation Test {{timestamp}}', vertical: 'novel' } });
+  steps.push({ action: 'create_session', params: { type: 'brainstorm' } });
+
+  // Send setup messages (establish facts)
+  for (const msg of setupMessages) {
+    steps.push({ action: 'send_message', params: { text: msg.text } });
+    steps.push({ action: 'wait_for_response', params: {} });
+  }
+
+  // Generate report — record step index for assertions
+  const reportStepIndex = steps.length;
+  steps.push({
+    action: 'generate_report',
+    params: { report_type: reportType, ...reportParams }
+  });
+
+  return {
+    id: `report-citation-${reportType}`,
+    name: `Report Citation Accuracy - ${reportType}`,
+    tags: ['citation', 'report', reportType],
+    timeout: 120000,
+    steps,
+    assertions: [
+      {
+        type: 'citation_accuracy',
+        reportStepIndex,
+        minAccuracy: thresholds.citationAccuracy ?? 0.90,
+        message: `Report citations should be >= ${((thresholds.citationAccuracy ?? 0.90) * 100).toFixed(0)}% accurate`
+      },
+      {
+        type: 'no_unsupported_claims',
+        reportStepIndex,
+        maxUnsupportedRate: thresholds.hallucinationRate ?? 0.05,
+        message: `Hallucination rate should be <= ${((thresholds.hallucinationRate ?? 0.05) * 100).toFixed(0)}%`
+      }
+    ]
+  };
+}
+
+/**
+ * Creates a scenario that: establishes facts → generates bible → checks all sections.
+ *
+ * @param {Object} config
+ * @param {string} config.templateKey - 'standard', 'heros_journey', etc.
+ * @param {Array<{text: string}>} config.setupMessages - Messages to establish facts
+ * @param {Array<string>} [config.allowEmpty] - Section keys allowed to be empty
+ * @param {Object} [config.thresholds] - Override default thresholds
+ * @returns {Object} Scenario with steps[] and assertions[]
+ */
+function createBibleCompletenessScenario(config) {
+  const {
+    templateKey,
+    setupMessages = [],
+    allowEmpty = [],
+    thresholds = {}
+  } = config;
+
+  if (!templateKey) {
+    throw new ConfigurationError('createBibleCompletenessScenario requires templateKey');
+  }
+  if (setupMessages.length === 0) {
+    throw new ConfigurationError('createBibleCompletenessScenario requires at least one setupMessage');
+  }
+
+  const steps = [];
+
+  steps.push({ action: 'create_story', params: { name: 'Bible Test {{timestamp}}', vertical: 'novel' } });
+  steps.push({ action: 'create_session', params: { type: 'brainstorm' } });
+
+  for (const msg of setupMessages) {
+    steps.push({ action: 'send_message', params: { text: msg.text } });
+    steps.push({ action: 'wait_for_response', params: {} });
+  }
+
+  const bibleStepIndex = steps.length;
+  steps.push({
+    action: 'generate_bible',
+    params: { template_key: templateKey }
+  });
+
+  return {
+    id: `bible-completeness-${templateKey}`,
+    name: `Bible Completeness - ${templateKey}`,
+    tags: ['citation', 'bible', templateKey],
+    timeout: 180000,
+    steps,
+    assertions: [
+      {
+        type: 'all_sections_populated',
+        bibleStepIndex,
+        allowEmpty,
+        message: 'All bible sections should have content'
+      }
+    ]
+  };
+}
+
+/**
+ * Creates a scenario with minimal facts to detect hallucination.
+ *
+ * @param {Object} config
+ * @param {string} config.reportType - Report type to generate
+ * @param {Object} [config.reportParams] - Report-specific params
+ * @param {Array<{text: string}>} config.setupMessages - Minimal messages
+ * @param {Object} [config.thresholds] - Override default thresholds
+ * @returns {Object} Scenario with steps[] and assertions[]
+ */
+function createHallucinationDetectionScenario(config) {
+  const {
+    reportType,
+    reportParams = {},
+    setupMessages = [],
+    thresholds = {}
+  } = config;
+
+  if (!reportType) {
+    throw new ConfigurationError('createHallucinationDetectionScenario requires reportType');
+  }
+  if (setupMessages.length === 0) {
+    throw new ConfigurationError('createHallucinationDetectionScenario requires at least one setupMessage');
+  }
+
+  const steps = [];
+
+  steps.push({ action: 'create_story', params: { name: 'Hallucination Test {{timestamp}}', vertical: 'novel' } });
+  steps.push({ action: 'create_session', params: { type: 'brainstorm' } });
+
+  for (const msg of setupMessages) {
+    steps.push({ action: 'send_message', params: { text: msg.text } });
+    steps.push({ action: 'wait_for_response', params: {} });
+  }
+
+  const reportStepIndex = steps.length;
+  steps.push({
+    action: 'generate_report',
+    params: { report_type: reportType, ...reportParams }
+  });
+
+  return {
+    id: `hallucination-${reportType}`,
+    name: `Hallucination Detection - ${reportType}`,
+    tags: ['hallucination', 'report', reportType],
+    timeout: 120000,
+    steps,
+    assertions: [
+      {
+        type: 'no_unsupported_claims',
+        reportStepIndex,
+        maxUnsupportedRate: thresholds.hallucinationRate ?? 0.10,
+        message: `Hallucination rate should be <= ${((thresholds.hallucinationRate ?? 0.10) * 100).toFixed(0)}%`
+      }
+    ]
+  };
+}
+
+module.exports = {
+  createReportCitationScenario,
+  createBibleCompletenessScenario,
+  createHallucinationDetectionScenario
+};
+```
+
 ---
 
 ## Test Specifications
 
-### Test File: `tests/agents/librarian/agent.test.js`
+### Test File: `tests/agents/librarian-agent.test.js`
 
-Target: **~120 tests** across 8 `describe` blocks.
+Target: **~120 tests** across 10 `describe` blocks.
 
 ---
 
-### Block 1: Constructor & Initialization (~15 tests)
+### Block 1: Initialization (~12 tests)
 
 ```javascript
-describe('LibrarianAgent - Constructor & Initialization', () => {
-  test('stores config and connector');
-  test('initializes with empty tracking arrays');
-  test('initialize() succeeds with reportTypes configured');
-  test('initialize() succeeds with bibleTemplates configured');
-  test('initialize() succeeds with scenarios configured');
-  test('initialize() succeeds with all three configured');
-  test('initialize() throws ConfigurationError when no reportTypes, bibleTemplates, or scenarios');
+describe('LibrarianAgent - Initialization', () => {
+  test('initialize() calls super.initialize()');
+  test('initialize() succeeds with valid scenarios');
+  test('initialize() throws ConfigurationError when no scenarios');
+  test('initialize() succeeds with default thresholds (none in config)');
   test('initialize() throws ConfigurationError for citationAccuracy < 0');
   test('initialize() throws ConfigurationError for citationAccuracy > 1');
   test('initialize() throws ConfigurationError for hallucinationRate < 0');
   test('initialize() throws ConfigurationError for hallucinationRate > 1');
   test('initialize() throws ConfigurationError for sectionCompleteness < 0');
   test('initialize() throws ConfigurationError for sectionCompleteness > 1');
-  test('initialize() resets tracking arrays on re-initialization');
-  test('initialize() uses default thresholds when none specified');
+  test('initialize() accepts valid thresholds (0 to 1)');
+  test('does not override constructor (uses BaseAgent constructor directly)');
 });
 ```
 
-### Block 2: Citation Extraction (~12 tests)
+### Block 2: evaluateAssertion Dispatch (~6 tests)
+
+```javascript
+describe('LibrarianAgent - evaluateAssertion dispatch', () => {
+  test('routes citation_accuracy to _evaluateCitationAccuracy');
+  test('routes no_unsupported_claims to _evaluateNoUnsupportedClaims');
+  test('routes all_sections_populated to _evaluateAllSectionsPopulated');
+  test('routes citation_supports_claim to _evaluateCitationSupportsClaim');
+  test('falls through to super.evaluateAssertion for built-in types (state_exists)');
+  test('falls through to super.evaluateAssertion for unknown types');
+});
+```
+
+### Block 3: citation_accuracy Assertion (~18 tests)
+
+```javascript
+describe('LibrarianAgent - citation_accuracy assertion', () => {
+  test('returns passed when accuracy meets threshold');
+  test('returns failed when accuracy below threshold');
+  test('returns result object with { type, passed, message, expected, actual, durationMs }');
+  test('actual contains accuracy, total, valid, invalid, details');
+  test('details contain per-citation { citationId, claimText, sourceExists, supportsClaim, valid }');
+  test('calls connector.performAction(verify_citation) for each extracted citation');
+  test('passes citationId and claimText to verify_citation');
+  test('defaults minAccuracy to 0.90 when not specified');
+  test('respects custom minAccuracy from assertion');
+  test('returns failed with message when step result is missing');
+  test('returns failed with message when step result status is failed');
+  test('returns failed when no citations found in content');
+  test('handles empty content string');
+  test('handles connector.performAction throwing error (marks citation invalid)');
+  test('handles mix of valid and invalid citations');
+  test('computes accuracy as valid / total');
+  test('accuracy is 0 when all citations invalid');
+  test('includes durationMs in result');
+});
+```
+
+### Block 4: no_unsupported_claims Assertion (~14 tests)
+
+```javascript
+describe('LibrarianAgent - no_unsupported_claims assertion', () => {
+  test('returns passed when all claims have citations');
+  test('returns passed when unsupported rate within threshold');
+  test('returns failed when unsupported rate exceeds threshold');
+  test('returns result object with correct shape');
+  test('actual contains rate, totalClaims, unsupportedClaims, examples');
+  test('examples contains first 3 uncited claims (truncated to 80 chars)');
+  test('defaults maxUnsupportedRate to 0.05');
+  test('respects custom maxUnsupportedRate');
+  test('returns passed for content with 0 claims');
+  test('treats fully uncited content as 100% unsupported');
+  test('ignores headers when counting claims');
+  test('ignores "*Not yet developed*" markers');
+  test('returns failed when step result is missing');
+  test('returns failed when step result status is failed');
+});
+```
+
+### Block 5: all_sections_populated Assertion (~12 tests)
+
+```javascript
+describe('LibrarianAgent - all_sections_populated assertion', () => {
+  test('returns passed when all sections have content');
+  test('returns failed when a section is empty string');
+  test('returns failed when a section is "*Not yet developed*"');
+  test('returns failed when a section is null');
+  test('returns failed when a section is whitespace only');
+  test('respects allowEmpty for specific sections');
+  test('actual contains completeness, totalSections, populatedSections, emptySections');
+  test('returns failed when step result is missing');
+  test('returns failed when step result has no sections object');
+  test('handles single section (passes when populated)');
+  test('lists all empty section keys in message');
+  test('completeness is populated / total');
+});
+```
+
+### Block 6: citation_supports_claim Assertion (~10 tests)
+
+```javascript
+describe('LibrarianAgent - citation_supports_claim assertion', () => {
+  test('returns passed when supports_claim is true');
+  test('returns failed when supports_claim is false');
+  test('returns failed when citationId missing');
+  test('returns failed when claimText missing');
+  test('defaults strictness to normal');
+  test('passes strictness to connector');
+  test('returns failed on connector error with error message');
+  test('actual includes sourceContent preview (truncated to 100 chars)');
+  test('actual includes sourceExists and supportsClaim booleans');
+  test('includes durationMs in result');
+});
+```
+
+### Block 7: Citation Extraction (~12 tests)
 
 ```javascript
 describe('LibrarianAgent - _extractCitations', () => {
   test('extracts single citation [abc12345]');
   test('extracts multiple citations from content');
   test('returns empty array for content with no citations');
+  test('returns empty array for null/undefined content');
   test('handles citations at start of content');
   test('handles citations at end of content');
   test('extracts claim text surrounding each citation');
   test('is case-insensitive (handles [ABC12345])');
+  test('lowercases extracted IDs');
   test('does not match non-hex IDs like [xyz12345]');
-  test('does not match IDs shorter than 8 chars');
-  test('does not match IDs longer than 8 chars');
+  test('does not match IDs shorter than 8 chars like [abc123]');
   test('handles multiple citations in same sentence');
-  test('handles content with markdown formatting');
 });
 ```
 
-### Block 3: Claim Extraction (~10 tests)
+### Block 8: Claim Extraction (~10 tests)
 
 ```javascript
 describe('LibrarianAgent - _extractClaims', () => {
@@ -1087,134 +1176,53 @@ describe('LibrarianAgent - _extractClaims', () => {
 });
 ```
 
-### Block 4: citation_valid Assertion (~15 tests)
-
-```javascript
-describe('LibrarianAgent - citation_valid assertion', () => {
-  test('passes when citation is valid (source exists and supports claim)');
-  test('fails when source does not exist');
-  test('fails when source exists but does not support claim');
-  test('fails when both source missing and no support');
-  test('throws AssertionError with descriptive message on failure');
-  test('throws AssertionError when citationId not provided');
-  test('tracks citation result in _citationResults');
-  test('handles empty claimText gracefully');
-  test('calls connector.performAction with verify_citation');
-  test('passes correct params to connector');
-  test('stores sourceContent in citation result when available');
-  test('handles connector returning null source_content');
-  test('accumulates multiple citation results across steps');
-  test('records position when provided in assertion');
-  test('_getCustomAssertionHandler returns handler for citation_valid');
-});
-```
-
-### Block 5: citation_supports_claim Assertion (~8 tests)
-
-```javascript
-describe('LibrarianAgent - citation_supports_claim assertion', () => {
-  test('passes when claim is supported at normal strictness');
-  test('passes when claim is supported at strict strictness');
-  test('passes when claim is supported at loose strictness');
-  test('fails when claim is not supported');
-  test('throws AssertionError when citationId missing');
-  test('throws AssertionError when claimText missing');
-  test('defaults to normal strictness when not specified');
-  test('includes source content preview in error message');
-});
-```
-
-### Block 6: no_unsupported_claims Assertion (~15 tests)
-
-```javascript
-describe('LibrarianAgent - no_unsupported_claims assertion', () => {
-  test('passes when all claims have citations');
-  test('passes when unsupported rate is within threshold');
-  test('fails when unsupported rate exceeds threshold');
-  test('throws AssertionError with rate and examples');
-  test('defaults to 0.05 max unsupported rate');
-  test('respects custom maxUnsupportedRate');
-  test('handles content with 0 claims (passes)');
-  test('treats content with no citations as 100% unsupported');
-  test('correctly counts cited vs uncited sentences');
-  test('ignores headers when counting claims');
-  test('ignores template markers when counting claims');
-  test('updates document analysis with claim counts');
-  test('updates document analysis with hallucination rate');
-  test('requires content parameter');
-  test('handles content with mixed cited and uncited claims');
-});
-```
-
-### Block 7: all_sections_populated Assertion (~12 tests)
-
-```javascript
-describe('LibrarianAgent - all_sections_populated assertion', () => {
-  test('passes when all sections have content');
-  test('fails when a section is empty string');
-  test('fails when a section is "*Not yet developed*"');
-  test('fails when a section is null');
-  test('respects allowEmpty for specific sections');
-  test('throws AssertionError listing empty section keys');
-  test('throws AssertionError when sections not provided');
-  test('throws AssertionError when sections is not an object');
-  test('reports correct completeness percentage');
-  test('updates document analysis with section count');
-  test('updates document analysis with completeness score');
-  test('handles single section (passes)');
-});
-```
-
-### Block 8: analyzeResults & generateReport (~15 tests)
+### Block 9: analyzeResults & generateReport (~16 tests)
 
 ```javascript
 describe('LibrarianAgent - analyzeResults & generateReport', () => {
-  test('computes overall citation accuracy from all citation results');
-  test('computes overall hallucination rate from all documents');
-  test('computes section completeness from bible documents only');
-  test('handles zero citations (accuracy = 1.0)');
-  test('handles zero claims (hallucination rate = 0)');
-  test('handles no bible documents (completeness = 1.0)');
-  test('thresholdsPassed reflects correct pass/fail per metric');
-  test('uses default thresholds when config.thresholds missing');
-  test('uses config thresholds when provided');
+  // analyzeResults
+  test('calls super.analyzeResults and merges result');
+  test('computes overallCitationAccuracy from citation_accuracy assertion results');
+  test('computes overallHallucinationRate from no_unsupported_claims assertion results');
+  test('computes overallSectionCompleteness from all_sections_populated assertion results');
+  test('handles zero citation_accuracy assertions (accuracy = 1.0)');
+  test('handles zero no_unsupported_claims assertions (rate = 0)');
+  test('handles zero all_sections_populated assertions (completeness = 1.0)');
+  test('thresholdsPassed uses config thresholds');
+  test('thresholdsPassed uses defaults when config thresholds missing');
+  test('assertionCounts tracks count of each custom assertion type');
 
-  test('generateReport returns passed status when all thresholds met');
-  test('generateReport returns failed status when any threshold missed');
-  test('generateReport includes per-document breakdowns');
-  test('generateReport includes failed citations list');
-  test('generateReport returns no_analysis when analyzeResults not called');
-  test('generateReport formats percentages correctly');
+  // generateReport
+  test('calls super.generateReport and merges result');
+  test('adds librarianSummary to report');
+  test('librarianSummary.status is passed when all thresholds met');
+  test('librarianSummary.status is failed when any threshold missed');
+  test('formats percentages correctly');
+  test('handles missing analysis.librarian gracefully');
 });
 ```
 
-### Block 9: Scenario Helpers (~18 tests)
+### Block 10: Scenario Helpers (~12 tests)
 
 ```javascript
-describe('LibrarianAgent - Scenario Helpers', () => {
+describe('Librarian Helpers', () => {
   // createReportCitationScenario
-  test('createReportCitationScenario generates valid scenario structure');
-  test('createReportCitationScenario includes setup message steps');
-  test('createReportCitationScenario includes generate_report step');
-  test('createReportCitationScenario includes get_citations step');
-  test('createReportCitationScenario includes no_unsupported_claims assertion');
-  test('createReportCitationScenario includes forEach citation_valid assertion');
-  test('createReportCitationScenario throws when reportType missing');
-  test('createReportCitationScenario throws when setupMessages empty');
-  test('createReportCitationScenario applies custom thresholds');
+  test('generates scenario with steps and assertions');
+  test('every step has an action field');
+  test('assertions are at scenario level (not embedded as steps)');
+  test('assertion.reportStepIndex points to generate_report step');
+  test('includes citation_accuracy and no_unsupported_claims assertions');
+  test('throws when reportType missing');
+  test('throws when setupMessages empty');
+  test('applies custom thresholds to assertions');
 
   // createBibleCompletenessScenario
-  test('createBibleCompletenessScenario generates valid scenario structure');
-  test('createBibleCompletenessScenario includes generate_bible step');
-  test('createBibleCompletenessScenario includes all_sections_populated assertion');
-  test('createBibleCompletenessScenario passes allowEmpty to assertion');
-  test('createBibleCompletenessScenario throws when templateKey missing');
-  test('createBibleCompletenessScenario throws when setupMessages empty');
+  test('generates scenario with generate_bible step');
+  test('includes all_sections_populated assertion with correct bibleStepIndex');
+  test('passes allowEmpty to assertion');
+  test('throws when templateKey missing');
 
-  // createHallucinationDetectionScenario
-  test('createHallucinationDetectionScenario generates valid scenario structure');
-  test('createHallucinationDetectionScenario defaults hallucinationRate to 0.10');
-  test('createHallucinationDetectionScenario throws when reportType missing');
+  // createHallucinationDetectionScenario (omitted for brevity, similar pattern)
 });
 ```
 
@@ -1222,10 +1230,10 @@ describe('LibrarianAgent - Scenario Helpers', () => {
 
 ## Mock Connector Patterns
 
-The tests use the existing `tests/helpers/mock-connector.js`. Specific mock setups for LibrarianAgent:
+Tests use the existing `tests/helpers/mock-connector.js`. Key mock configurations:
 
 ```javascript
-// Mock for verify_citation — valid citation
+// --- verify_citation: valid citation ---
 mockConnector.performAction.mockImplementation((action, params) => {
   if (action === 'verify_citation') {
     return Promise.resolve({
@@ -1238,7 +1246,7 @@ mockConnector.performAction.mockImplementation((action, params) => {
   return Promise.resolve({});
 });
 
-// Mock for verify_citation — invalid (source missing)
+// --- verify_citation: source missing ---
 mockConnector.performAction.mockImplementation((action, params) => {
   if (action === 'verify_citation') {
     return Promise.resolve({
@@ -1251,7 +1259,7 @@ mockConnector.performAction.mockImplementation((action, params) => {
   return Promise.resolve({});
 });
 
-// Mock for verify_citation — source exists but doesn't support claim
+// --- verify_citation: source exists but doesn't support ---
 mockConnector.performAction.mockImplementation((action, params) => {
   if (action === 'verify_citation') {
     return Promise.resolve({
@@ -1263,54 +1271,51 @@ mockConnector.performAction.mockImplementation((action, params) => {
   }
   return Promise.resolve({});
 });
+```
 
-// Mock for generate_report
-mockConnector.performAction.mockImplementation((action, params) => {
-  if (action === 'generate_report') {
-    return Promise.resolve({
+**Creating scenarioContext for assertion tests:**
+
+```javascript
+// Helper to create scenarioContext with step results
+function createScenarioContext(overrides = {}) {
+  return {
+    scenarioId: 'test-scenario',
+    stepResults: [],
+    lastStepResult: null,
+    ...overrides
+  };
+}
+
+// Helper: scenarioContext with a report step result at a given index
+function contextWithReportAt(stepIndex, reportContent, citationMap = {}) {
+  const stepResults = new Array(stepIndex + 1).fill({ status: 'passed', result: {} });
+  stepResults[stepIndex] = {
+    status: 'passed',
+    result: {
       id: 'report-123',
-      content: 'Sarah is a marine biologist [abc12345] who fears deep water [def67890].',
-      citation_map: {
-        'abc12345': '550e8400-e29b-41d4-a716-446655440000',
-        'def67890': '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
-      },
+      content: reportContent,
+      citation_map: citationMap,
       report_type: 'character_profile',
-      title: 'Character Profile: Sarah'
-    });
-  }
-  return Promise.resolve({});
-});
+      title: 'Test Report'
+    }
+  };
+  return createScenarioContext({ stepResults });
+}
 
-// Mock for generate_bible
-mockConnector.performAction.mockImplementation((action, params) => {
-  if (action === 'generate_bible') {
-    return Promise.resolve({
+// Helper: scenarioContext with a bible step result at a given index
+function contextWithBibleAt(stepIndex, sections) {
+  const stepResults = new Array(stepIndex + 1).fill({ status: 'passed', result: {} });
+  stepResults[stepIndex] = {
+    status: 'passed',
+    result: {
       id: 'bible-456',
-      sections: {
-        premise: 'A lighthouse keeper discovers a hidden room [abc12345].',
-        characters: 'Thomas is a retired sea captain [def67890].',
-        setting: '1890s New England coastal town [ghi11111].',
-        themes: '*Not yet developed*'
-      },
+      sections,
       template_key: 'standard',
       version: 1
-    });
-  }
-  return Promise.resolve({});
-});
-
-// Mock for get_citations
-mockConnector.performAction.mockImplementation((action, params) => {
-  if (action === 'get_citations') {
-    return Promise.resolve({
-      citations: [
-        { id: 'abc12345', claim_text: 'Sarah is a marine biologist', surrounding_context: '...' },
-        { id: 'def67890', claim_text: 'who fears deep water', surrounding_context: '...' }
-      ]
-    });
-  }
-  return Promise.resolve({});
-});
+    }
+  };
+  return createScenarioContext({ stepResults });
+}
 ```
 
 ---
@@ -1320,14 +1325,15 @@ mockConnector.performAction.mockImplementation((action, params) => {
 | # | File | Purpose |
 |---|------|---------|
 | 1 | `agents/librarian/agent.js` | LibrarianAgent class |
-| 2 | `tests/agents/librarian/agent.test.js` | Unit tests (~120 tests) |
-| 3 | `apps/brainstormy/agents/librarian.config.json` | Brainstormy-specific config |
-| 4 | `apps/brainstormy/scenarios/bible-tests.json` | Bible completeness scenarios |
-| 5 | `docs/librarian-agent-implementation-spec.md` | This spec |
+| 2 | `tests/helpers/librarian-helpers.js` | Scenario helper functions |
+| 3 | `tests/agents/librarian-agent.test.js` | Unit tests (~120 tests) |
+| 4 | `docs/librarian-agent-implementation-spec.md` | This spec |
 
-**Files modified:**
-- `agents/index.js` — export LibrarianAgent
-- `agents/errors.js` — no changes needed (reuses existing error types)
+**No files modified** — LibrarianAgent is imported directly (`require('../../agents/librarian/agent')`), no index file needed.
+
+**Deferred (out of scope, same as base-agent-healer spec):**
+- `apps/brainstormy/agents/librarian.config.json` — config files deferred until integration phase
+- `apps/brainstormy/scenarios/bible-tests.json` — scenario files deferred until integration phase
 
 ---
 
@@ -1336,77 +1342,108 @@ mockConnector.performAction.mockImplementation((action, params) => {
 ### Step 1: Create `agents/librarian/agent.js`
 
 Copy the full implementation from the "Full Implementation" section above. Verify:
-- `require('../base/agent')` resolves correctly
+- `require('../base-agent')` resolves correctly (NOT `../base/agent`)
 - `require('../errors')` resolves correctly
-- All method signatures match the spec
+- No constructor override — uses BaseAgent's constructor directly
+- `initialize()` calls `await super.initialize()` first
+- `evaluateAssertion()` uses switch + `super.evaluateAssertion()` fallback (NOT `_getCustomAssertionHandler`)
+- All assertion handlers return `{ type, passed, message, expected, actual, durationMs }` — never throw
+- `analyzeResults(testRunResult)` calls `await super.analyzeResults(testRunResult)` and spreads result
+- `generateReport(analysis)` calls `await super.generateReport(analysis)` and spreads result
+- Both are async
 
-### Step 2: Export from `agents/index.js`
+### Step 2: Create `tests/helpers/librarian-helpers.js`
 
-Add to existing exports:
-```javascript
-const LibrarianAgent = require('./librarian/agent');
-// ... add to module.exports
-```
+Copy from the "Full Implementation" section. Verify:
+- Exports 3 functions: `createReportCitationScenario`, `createBibleCompletenessScenario`, `createHallucinationDetectionScenario`
+- All return `{ id, name, tags, timeout, steps[], assertions[] }`
+- Every step has an `action` field
+- Assertions are at scenario level (in `assertions` array), NOT embedded as steps
+- Assertions reference step indices via `reportStepIndex` / `bibleStepIndex`
+- No `storeResult`, `contentRef`, `forEach`, or `id` fields on steps
 
-### Step 3: Create test file `tests/agents/librarian/agent.test.js`
+### Step 3: Create `tests/agents/librarian-agent.test.js`
 
 Structure:
 ```javascript
-const LibrarianAgent = require('../../../agents/librarian/agent');
-const { ConfigurationError, AssertionError } = require('../../../agents/errors');
-const { createMockConnector } = require('../../helpers/mock-connector');
-
-describe('LibrarianAgent', () => {
-  let agent;
-  let mockConnector;
-  let defaultConfig;
-
-  beforeEach(() => {
-    mockConnector = createMockConnector();
-    defaultConfig = {
-      id: 'librarian',
-      name: 'LibrarianAgent',
-      reportTypes: ['outline', 'character_profile'],
-      bibleTemplates: ['standard'],
-      scenarios: [],
-      thresholds: {
-        citationAccuracy: 0.90,
-        hallucinationRate: 0.05,
-        sectionCompleteness: 1.0
-      },
-      knownIssues: []
-    };
-    agent = new LibrarianAgent(defaultConfig, mockConnector);
-  });
-
-  // ... all describe blocks from Test Specifications section
-});
+const LibrarianAgent = require('../../agents/librarian/agent');
+const { ConfigurationError } = require('../../agents/errors');
+const { createMockConnector } = require('../helpers/mock-connector');
+const {
+  createReportCitationScenario,
+  createBibleCompletenessScenario,
+  createHallucinationDetectionScenario
+} = require('../helpers/librarian-helpers');
 ```
 
-### Step 4: Create config files
+File path is flat: `tests/agents/librarian-agent.test.js` (NOT nested `tests/agents/librarian/agent.test.js`).
 
-Create `apps/brainstormy/agents/librarian.config.json` from the Config Shape section.
-Create `apps/brainstormy/scenarios/bible-tests.json` with sample bible scenarios.
+Key testing patterns:
+- Test assertion handlers directly by calling `agent.evaluateAssertion(assertion, scenarioContext)`
+- Build `scenarioContext` with mock step results using helper functions
+- For `analyzeResults`, build `testRunResult` with mock `scenarios[].assertionResults[]`
+- For `generateReport`, pass the analysis object from `analyzeResults`
+- Verify super calls by checking baseAnalysis/baseReport fields are present in output
 
-### Step 5: Run tests
+### Step 4: Run tests
 
 ```bash
-npx jest tests/agents/librarian/ --verbose
+npx jest tests/agents/librarian-agent.test.js --verbose
+npx jest --verbose  # All tests to verify no regressions
 ```
 
-Target: **~120 tests, all passing**.
+Target: **~120 new tests passing**, ~637 + ~120 = **~757 total**.
 
-### Step 6: Validate against established patterns
+### Step 5: Validate against established patterns
 
 Verify:
-- [ ] Constructor takes `(config, connector)` — never imports connector classes
-- [ ] Only overrides `initialize()`, `analyzeResults()`, `generateReport()` — never `runTests()` or `runScenario()`
-- [ ] Custom assertions registered via `_getCustomAssertionHandler()`
-- [ ] All connector calls go through `this.connector.performAction(action, params)`
-- [ ] Error types use existing hierarchy: `ConfigurationError`, `AssertionError` (intentional spelling)
-- [ ] Static scenario helpers follow SentinelAgent pattern
-- [ ] Tests use `createMockConnector()` from `tests/helpers/mock-connector.js`
-- [ ] No direct imports of connector classes anywhere in agent code
+- [ ] Import path: `require('../base-agent')` — NOT `require('../base/agent')`
+- [ ] No constructor override
+- [ ] `initialize()` calls `await super.initialize()` first
+- [ ] `evaluateAssertion()` uses switch + `super.evaluateAssertion()` default case
+- [ ] All assertion handlers return result objects — never throw
+- [ ] `analyzeResults(testRunResult)` is async, takes param, calls super, reads from testRunResult
+- [ ] `generateReport(analysis)` is async, takes param, calls super, adds `librarianSummary`
+- [ ] Scenario helpers in `tests/helpers/librarian-helpers.js` — NOT static on class
+- [ ] Test file at `tests/agents/librarian-agent.test.js` — flat, NOT nested
+- [ ] Every step has `action` field
+- [ ] Assertions at scenario level, NOT embedded as steps
+- [ ] No `storeResult`, `contentRef`, `forEach`, `_getCustomAssertionHandler`, or step `id` fields
+
+---
+
+## Issue Resolution Log
+
+All 14 issues from v1 feasibility review addressed:
+
+### CRITICAL (7)
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| 1 | Wrong import path `../base/agent` | Fixed → `require('../base-agent')` |
+| 2 | `analyzeResults()` wrong signature/async/super | Fixed → `async analyzeResults(testRunResult)` with `super.analyzeResults(testRunResult)` call, reads from `testRunResult.scenarios[].assertionResults[]` not instance state |
+| 3 | `generateReport()` wrong signature/async/super | Fixed → `async generateReport(analysis)` with `super.generateReport(analysis)` call, takes analysis param not instance state |
+| 4 | `_getCustomAssertionHandler()` doesn't exist | Fixed → override `evaluateAssertion(assertion, scenarioContext)` with switch + `super.evaluateAssertion()` fallback |
+| 5 | Assertion handler signature + throw vs return | Fixed → handlers return `{ type, passed, message, expected, actual, durationMs }`, never throw |
+| 6 | `storeResult`/`contentRef`/`forEach` don't exist | Fixed → assertions reference step results via `scenarioContext.stepResults[assertion.reportStepIndex]`. `citation_accuracy` is a batch assertion that internally iterates citations. No dynamic step generation needed. |
+| 7 | Assertions embedded as steps (no action field) | Fixed → assertions live at `scenario.assertions[]` (scenario-level). All steps have `action` field. |
+
+### MEDIUM (4)
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| 8 | `initialize()` doesn't call `super.initialize()` | Fixed → first line is `await super.initialize()` |
+| 9 | Test file path `tests/agents/librarian/agent.test.js` | Fixed → `tests/agents/librarian-agent.test.js` (flat) |
+| 10 | `agents/index.js` doesn't exist | Fixed → removed from steps. Direct import: `require('../../agents/librarian/agent')` |
+| 11 | `apps/brainstormy/` directories don't exist | Fixed → config files marked as deferred/out-of-scope, removed from files-to-create |
+
+### LOW (3)
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| 12 | Steps have unused `id` fields | Fixed → no `id` fields on steps in scenario helpers |
+| 13 | Static helpers on agent class vs helper files | Fixed → helpers in `tests/helpers/librarian-helpers.js` |
+| 14 | Constructor override adds instance state | Fixed → no constructor override. No mutable instance state. All data flows through method parameters. |
 
 ---
 
@@ -1424,10 +1461,11 @@ _Track any implementation deviations here during Day 4 build._
 
 **Day 4 is complete when:**
 - [ ] `agents/librarian/agent.js` exists with full implementation
-- [ ] ~120 tests passing in `tests/agents/librarian/agent.test.js`
-- [ ] All 4 custom assertion types working
-- [ ] All 3 scenario helpers producing valid scenarios
-- [ ] `analyzeResults()` computes correct metrics
-- [ ] `generateReport()` produces complete report
+- [ ] `tests/helpers/librarian-helpers.js` exists with 3 helper functions
+- [ ] ~120 tests passing in `tests/agents/librarian-agent.test.js`
+- [ ] All 4 custom assertion types working via `evaluateAssertion` override
+- [ ] All 3 scenario helpers producing valid scenarios (steps with actions, assertions at scenario level)
+- [ ] `analyzeResults(testRunResult)` computes correct aggregate metrics from assertion results
+- [ ] `generateReport(analysis)` produces complete report with `librarianSummary`
 - [ ] Total project tests: ~637 + ~120 = ~757 passing
-- [ ] No regressions in existing agent tests
+- [ ] No regressions in existing agent tests (`npx jest --verbose`)
