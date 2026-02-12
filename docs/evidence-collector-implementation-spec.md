@@ -3,7 +3,7 @@
 **Phase:** 1, Week 1, Days 1-2  
 **Purpose:** Implementation-ready spec for `core/engine/evidence-collector.js`  
 **For:** Claude Code implementation  
-**Revision:** v1.1 — Post-feasibility review. Fixed: timing duration calculation (BUG 2), async capture race condition (BUG 3), request.response() docs (BUG 1), redaction list sync (MISMATCH 1), filename sanitization docs (GAP 2). Added BaseConnector test mock update note (MISMATCH 2).  
+**Revision:** v1.2 — Second feasibility review. Fixed: mock request.response() sync (ISSUE 1), BaseConnector test assertion + mock update (ISSUE 2), removed phantom _generateFilename from inventory (ISSUE 3). Prior v1.1 fixes retained.  
 **References:** qa-engine-02-core-engine-spec.md (Section 4), qa-engine-04-database-schema-spec.md (evidence_metadata table)  
 **Depends on:** Nothing — no internal QA Engine dependencies. Uses Playwright and filesystem only.  
 **Depended on by:** `connectors/base-connector.js` (already implemented — delegates 4 methods to this class)
@@ -78,7 +78,6 @@ Any changes to these signatures would break BaseConnector. They are the public A
 | Method | Signature | Purpose |
 |--------|-----------|---------|
 | `_ensureDirectories()` | `async () → void` | Create evidence directory structure on first use. |
-| `_generateFilename(name, extension)` | `(string, string) → string` | Generate unique, sortable filename with timestamp. |
 | `_writeIndex()` | `async () → void` | Write `index.json` summary file to the run's evidence directory. |
 
 ### 2.4 Buffer Management Methods (Internal)
@@ -1012,7 +1011,7 @@ function createMockRequest({ url = 'https://api.example.com/data', method = 'GET
     headers: () => ({ 'content-type': 'application/json', ...headers }),
     timing: () => timing ?? { startTime: 0, responseEnd: 150 },
     failure: () => failure ?? null,
-    response: () => Promise.resolve(null)  // Override per test
+    response: () => null  // Synchronous, matches Playwright v1.58. Override per test.
   };
 }
 
@@ -1096,7 +1095,9 @@ node -e "
 
 8. **Timing calculation.** `request.timing()` returns timestamps, not durations. Duration is calculated as `responseEnd - startTime`. Both fields may be `-1` when unavailable — the implementation guards against this and defaults to `0`.
 
-9. **BaseConnector test mock update needed.** The existing `tests/connectors/base-connector.test.js` mock uses `screenshot` (singular, string path) for the `collectAll` return value. The real EvidenceCollector returns `screenshots` (plural, `{ full, viewport }` object). Update the BaseConnector test mock's `collectAll` return value to match:
+9. **BaseConnector test mock AND assertion update needed.** The existing `tests/connectors/base-connector.test.js` mock uses `screenshot` (singular, string path) for the `collectAll` return value. The real EvidenceCollector returns `screenshots` (plural, `{ full, viewport }` object). Update **both** the mock return value and the assertion:
+
+   Mock data (update `collectAll` return value):
    ```javascript
    collectAll: jest.fn().mockResolvedValue({
      stepName: 'test_step',
@@ -1110,7 +1111,19 @@ node -e "
      summary: { totalLogs: 0, errorLogs: 0, warnLogs: 0, totalRequests: 0, failedRequests: 0 }
    })
    ```
-   This doesn't break existing tests (since `collectAll` is fully mocked), but should be done during this implementation to prevent integration test surprises.
+
+   Assertion (update the `collectEvidence` test assertion at line ~237):
+   ```javascript
+   // Before:
+   expect(result).toHaveProperty('screenshot');
+
+   // After:
+   expect(result).toHaveProperty('screenshots');
+   expect(result.screenshots).toHaveProperty('full');
+   expect(result.screenshots).toHaveProperty('viewport');
+   ```
+
+   **Both changes are required together** — updating the mock without updating the assertion will cause the test to fail.
 
 ---
 
