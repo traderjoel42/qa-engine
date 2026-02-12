@@ -38,3 +38,22 @@ Created LibrarianAgent class extending BaseAgent with:
 - [x] No `scenario.assertionResults` anywhere
 
 **Lines:** 554
+
+---
+
+## Step 2: Create `tests/helpers/librarian-helpers.js`
+
+Created 3 scenario helper functions:
+- `createReportCitationScenario(config)` — establishes facts → generates report → `citation_accuracy` + `no_unsupported_claims` assertions
+- `createBibleCompletenessScenario(config)` — establishes facts → generates bible → `all_sections_populated` assertion
+- `createHallucinationDetectionScenario(config)` — minimal facts → generates report → `no_unsupported_claims` with higher threshold (10%)
+
+**Verification checklist:**
+- [x] All 3 functions exported
+- [x] Every step has an `action` field
+- [x] Assertions at scenario level in `assertions[]` array
+- [x] `reportStepIndex` / `bibleStepIndex` computed as `steps.length` before pushing generation step
+- [x] No `storeResult`, `contentRef`, `forEach`, or step-level `id` fields
+- [x] All 3 throw `ConfigurationError` on missing required params
+
+**Lines:** 198
