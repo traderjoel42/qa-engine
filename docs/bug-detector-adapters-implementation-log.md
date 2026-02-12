@@ -40,3 +40,30 @@ Created 5 error classes: EngineError, BugDetectorError, FixError, ApprovalError,
 
 **Test run:** 11/11 passing
 **Deviations:** None — copied from spec exactly
+
+---
+
+## Step 3: Create Linear Client + Tests
+
+**Implementation:** `core/integrations/linear/client.js` — LinearClient extends BugTrackerAdapter
+
+**Methods:** constructor, createIssue, updateIssue, addComment, getIssue, _graphql, _mapPriority, _resolveLabels, _resolveState
+
+**Test file:** `tests/integrations/linear/client.test.js` — 36 tests across 7 groups:
+- Constructor: 4 tests
+- createIssue(): 9 tests
+- updateIssue(): 5 tests
+- addComment(): 5 tests
+- getIssue(): 4 tests
+- _graphql() Internal: 5 tests
+- _resolveLabels(): 4 tests
+
+**Verification:**
+- [x] Import: `require('../adapters/bug-tracker')` resolves
+- [x] Import: `require('../../engine/errors')` resolves
+- [x] Extends BugTrackerAdapter
+- [x] All GraphQL operations tested via mock httpClient
+- [x] Never calls real Linear API
+
+**Test run:** 36/36 passing
+**Deviations:** None — copied from spec exactly
