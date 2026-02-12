@@ -58,3 +58,21 @@ Full implementation per Section 5:
 - `initialize()` — calls `connector.healthCheck()`, throws ScenarioError if unhealthy
 - `analyzeResults()` — regression detection via knownIssues config, health score computation, isHealthy threshold check
 - `generateReport()` — adds healerSummary with healthScore, regressions, knownFailures
+
+---
+
+## Step 5: Create test files
+
+**Status:** Complete
+
+### tests/agents/agent-errors.test.js
+- 4 describe blocks: AgentError, ScenarioError, AssertionError, ConfigurationError
+- Tests: default properties, stores fields, toJSON serialization, inheritance, overrides
+
+### tests/agents/base-agent.test.js
+- 12 describe blocks covering all BaseAgent methods
+- Constructor, getAgentId, getScenarios, resolveParams, executeStep, evaluateAssertion (all 10 types + error handling), evaluateAssertions, runScenario (including timeout, skipped steps), runTests, analyzeResults, generateReport, hooks, _computeSummary
+
+### tests/agents/healer-agent.test.js
+- 5 describe blocks: extends BaseAgent, initialize, analyzeResults, generateReport, end-to-end
+- Regression detection, known issues classification, health score, threshold, full lifecycle
