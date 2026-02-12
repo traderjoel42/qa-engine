@@ -27,3 +27,21 @@ Config factories provide inline scenario configs for agent and healer tests.
 - `ScenarioError` — phase defaults to 'execute', recoverable defaults to true, both overridable
 - `AssertionError` — adds expected/actual, toJSON includes them (intentional spelling per spec)
 - `ConfigurationError` — phase 'initialize', recoverable false
+
+---
+
+## Step 3: Create agents/base-agent.js
+
+**Status:** Complete
+**File:** `agents/base-agent.js`
+**Class:** `BaseAgent`
+
+Full implementation per Section 5:
+- Constructor with config + connector validation (throws ConfigurationError)
+- `runTests()` → `runScenario()` → `_executeScenarioSteps()` → `executeStep()` chain
+- `runScenario()` enforces per-scenario timeout via `Promise.race` with `_executeScenarioSteps()`
+- Non-recoverable failures and timeouts mark remaining steps as `status: 'skipped'`
+- 10 assertion types: state_exists, state_equals, state_contains, state_truthy, url_contains, url_matches, element_exists, element_text_contains, response_contains, step_succeeded
+- Hook methods: `initialize()`, `cleanup()`, `analyzeResults()`, `generateReport()`
+- Utility: `resolveParams()` (4 template vars), `getScenarios()` (with tag filtering), `getAgentId()`
+- Private: `_computeSummary()`, `_generateSimpleId()`
