@@ -334,10 +334,13 @@ Test: "Fix generation LLM error returns clean FixResult"
 ```
 
 ```
-Test: "Rollback error during apply-error is caught"
+Test: "Rollback error during apply-error throws FixError"
   1. codeExecutor.applyChanges throws
   2. codeExecutor.rollback also throws
-  3. Verify overall flow still returns (doesn't crash)
+  3. The rollbackFix FixError propagates to the outer catch
+  4. Outer catch updates storage with status='failed', attempts best-effort rollback (caught), then throws FixError
+  5. Verify: await expect(autoFixer.generateAndApplyFix(...)).rejects.toThrow(FixError)
+  6. Verify fix storage updated with status='failed'
 ```
 
 ```
@@ -366,39 +369,55 @@ Test: "AdapterError from base classes"
 
 **Group 5: Orchestrator Wiring (~5 tests)**
 
-These test how the Bug Detector connects to the TestOrchestrator's `failureHandler` interface.
+These test how the Bug Detector connects to the TestOrchestrator's `failureHandler` interface. The actual interface is an **object with a `handle(result)` method** where `result` is a full `OrchestratorResult`. The app config must be captured in a closure since `OrchestratorResult` contains `appId` (string) but not the full app config object.
 
 ```
-Test: "Bug Detector wraps as failureHandler correctly"
+Test: "Bug Detector wraps as failureHandler object with handle() method"
   1. Create bug detector
-  2. Create closure: failureHandler = async (agentId, failures, ctx) => { ... }
-  3. Call failureHandler with array of failures
-  4. Verify detectAndReport called for each failure
+  2. Capture appConfig in closure scope
+  3. Create failureHandler:
+     const appConfig = { id: 'brainstormy', name: 'Brainstormy' };
+     const failureHandler = {
+       handle: async (result) => {
+         for (const agentResult of result.agentResults) {
+           for (const scenario of agentResult.scenarios) {
+             if (scenario.status === 'failed' || scenario.status === 'error') {
+               await bugDetector.detectAndReport(appConfig, agentResult.agentId, scenario);
+             }
+           }
+         }
+       }
+     };
+  4. Call failureHandler.handle(mockOrchestratorResult) with 2 failed scenarios
+  5. Verify detectAndReport called twice with correct agentIds
 ```
 
 ```
-Test: "failureHandler processes multiple failures sequentially"
-  1. Pass 3 failures to handler
-  2. Verify 3 separate bugs created (BUG-1, BUG-2, BUG-3)
+Test: "failureHandler.handle() processes multiple agent results sequentially"
+  1. Create OrchestratorResult with 2 agents, each with 1 failed scenario
+  2. Call failureHandler.handle(result)
+  3. Verify 2 separate bugs created (BUG-1, BUG-2)
 ```
 
 ```
-Test: "failureHandler continues after one detection error"
-  1. First failure triggers LLM error (degraded mode)
-  2. Second failure succeeds normally
-  3. Both bugs created
+Test: "failureHandler.handle() skips passed scenarios"
+  1. Create OrchestratorResult with 3 scenarios: 1 passed, 1 failed, 1 error
+  2. Call failureHandler.handle(result)
+  3. Verify detectAndReport called only for failed + error scenarios (2 calls, not 3)
 ```
 
 ```
-Test: "failureHandler passes correct app config from context"
-  1. context = { appConfig: { name: 'Brainstormy', ... } }
-  2. Verify detectAndReport receives correct app
+Test: "failureHandler.handle() continues after one detection error"
+  1. First scenario triggers LLM error (degraded mode)
+  2. Second scenario succeeds normally
+  3. Both bugs created — handler doesn't abort on first error
 ```
 
 ```
-Test: "failureHandler can be replaced with no-op (Week 2 default)"
-  1. No-op handler: async () => {}
-  2. Verify orchestrator continues without error
+Test: "No-op failureHandler matches TestOrchestrator default"
+  1. No-op handler: { handle: async () => {} }
+  2. Call handle(mockOrchestratorResult) — verify no errors thrown
+  3. This matches the TestOrchestrator's default: { handle: async () => {} }
 ```
 
 ---
@@ -431,7 +450,7 @@ Fix these in the source files and update unit tests if needed.
 ### Step 4: Final full-suite run
 ```
 Run entire test suite: connectors + agents + orchestrator + bug detector + approval manager + auto-fixer + integration.
-Expected: ~1193 (after Days 3-4) + ~45 (integration) = ~1238 total tests passing.
+Expected: ~1200 (after Days 3-4) + ~45 (integration) = ~1245 total tests passing.
 ```
 
 ---
@@ -444,9 +463,9 @@ Expected: ~1193 (after Days 3-4) + ~45 (integration) = ~1238 total tests passing
 - [ ] All error isolation tests pass (component failures don't cascade)
 - [ ] Cross-component data flow verified (evidence propagates correctly)
 - [ ] Orchestrator failureHandler wiring works
-- [ ] Total project tests: ~1238 passing
+- [ ] Total project tests: ~1245 passing
 - [ ] No regressions in any existing test suites
-- [ ] **Week 3 milestone: Bug detection + auto-fix pipeline complete, ~1238 tests passing**
+- [ ] **Week 3 milestone: Bug detection + auto-fix pipeline complete, ~1245 tests passing**
 
 ---
 
@@ -454,9 +473,9 @@ Expected: ~1193 (after Days 3-4) + ~45 (integration) = ~1238 total tests passing
 
 | Day | Component | New Tests | Running Total |
 |-----|-----------|-----------|---------------|
-| 1-2 | Bug Detector + Adapters + Linear Client | ~170 | ~1033 |
-| 3-4 | Auto-Fixer + Approval Manager | ~160 | ~1193 |
-| 5 | Integration Testing | ~45 | ~1238 |
+| 1-2 | Bug Detector + Adapters + Linear Client | ~165 | ~1028 |
+| 3-4 | Auto-Fixer + Approval Manager | ~172 | ~1200 |
+| 5 | Integration Testing | ~45 | ~1245 |
 
 **Week 3 deliverables:**
 - 6 new source files (bug-detector, approval-manager, auto-fixer, errors, 3 adapter interfaces)
