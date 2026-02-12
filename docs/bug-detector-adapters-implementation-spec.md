@@ -30,21 +30,34 @@ This spec covers the Bug Detector (the core engine component that analyzes test 
 
 ## Design Decisions
 
-### D1: Bug Detector as Standalone Class — Not a failureHandler Function
+### D1: Bug Detector as Standalone Class — Wrapped in a failureHandler Object
 
-The TestOrchestrator accepts `failureHandler` as an injectable dependency with signature `async (agentId, failures, context) => void`. The Bug Detector is a full class with its own dependencies. The wiring layer creates a closure:
+The TestOrchestrator accepts `failureHandler` as an injectable dependency — an **object with a `handle(result)` method** where `result` is the full `OrchestratorResult`. The no-op default is `{ handle: async () => {} }`. The orchestrator calls `this._failureHandler.handle(result)` in its post-hooks, passing the complete result with `runId`, `appId`, `agentResults`, `summary`, and `overallStatus`.
+
+The Bug Detector is a full class with its own dependencies. The wiring layer wraps it in a failureHandler object that iterates failed scenarios:
 
 ```javascript
 const bugDetector = new BugDetector({ llm, bugTracker, notifier, storage, approvalManager });
-const failureHandler = async (agentId, failures, context) => {
-  for (const failure of failures) {
-    await bugDetector.detectAndReport(context.appConfig, agentId, failure);
+const failureHandler = {
+  handle: async (result) => {
+    for (const agentResult of result.agentResults) {
+      for (const scenario of agentResult.scenarios) {
+        if (scenario.status === 'failed' || scenario.status === 'error') {
+          await bugDetector.detectAndReport({ id: result.appId }, agentResult.agentId, scenario);
+        }
+      }
+    }
   }
 };
-const orchestrator = new TestOrchestrator(appConfig, { failureHandler });
+const orchestrator = new TestOrchestrator({ failureHandler });
 ```
 
-**Why:** BugDetector needs its own rich dependency graph (LLM, bug tracker, notifier). Flattening that into a single function would lose testability. The closure adapts the class to the orchestrator's interface.
+**Key points:**
+- `TestOrchestrator` takes a single `options` object in its constructor — `appConfig` is passed at run time via `run(appConfig, options)`
+- `failureHandler.handle()` receives the full `OrchestratorResult`, not individual failures
+- The wrapper extracts failed/errored scenarios and routes each to `detectAndReport()`
+
+**Why:** BugDetector needs its own rich dependency graph (LLM, bug tracker, notifier). Wrapping it in a handler object preserves testability while matching the orchestrator's actual interface.
 
 ### D2: Adapter Interfaces Are Base Classes with `throw 'Not implemented'`
 
@@ -65,7 +78,7 @@ The LLM prompt requests JSON output. We parse with `JSON.parse()` inside a try/c
 
 ### D5: Bug ID Generation Is In-Memory Counter — Not Database Sequence
 
-For Phase 1, bug IDs (`BUG-1`, `BUG-2`, etc.) use a simple in-memory counter seeded from storage on construction. The database spec shows a `generate_bug_id()` function, but we won't have the database layer until later. The `storage` injectable handles persistence — the default no-op storage means IDs reset on restart (acceptable for Phase 1).
+For Phase 1, bug IDs (`BUG-1`, `BUG-2`, etc.) use a simple in-memory counter starting at 1. The database spec shows a `generate_bug_id()` function, but we won't have the database layer until later. The `storage` injectable defines a `getNextBugNumber` method for future use, but the Phase 1 implementation does not call it — the counter resets on restart, which is acceptable for Phase 1. When the database layer is added, the constructor can seed `_bugCounter` from `storage.getNextBugNumber()`.
 
 ### D6: Auto-Fixability Is Conservative — Default False
 
@@ -980,7 +993,7 @@ class BugDetector {
     const prompt = this._buildAnalysisPrompt(app, agentId, failure, evidence);
 
     const response = await this._llm.complete(prompt, {
-      model: 'claude-sonnet-4-5-20250514',
+      model: 'claude-sonnet-4-5-20250929',
       maxTokens: 1024,
       temperature: 0.2,
       systemPrompt: 'You are a QA engineer analyzing test failures. Return your analysis as valid JSON only, with no markdown fencing or extra text.'
@@ -1063,7 +1076,7 @@ class BugDetector {
       'performance': true
     };
 
-    return categoryRules[classification.category] !== false;
+    return categoryRules[classification.category] === true;
   }
 
   /**
@@ -1476,7 +1489,7 @@ function createMockLLM(overrides = {}) {
         impact_assessment: 'High impact - memory recall broken'
       }),
       usage: { inputTokens: 500, outputTokens: 200 },
-      model: 'claude-sonnet-4-5-20250514'
+      model: 'claude-sonnet-4-5-20250929'
     }),
     streamComplete: jest.fn(),
     ...overrides
@@ -1653,7 +1666,7 @@ Verify: Pipeline handles all combinations: LLM success/failure × bugTracker pre
 
 ### Step 5: Verify no regressions
 ```
-Run full test suite. Expected: ~764 (existing) + ~170 (new) = ~934 tests passing.
+Run full test suite. Expected: ~863 (existing) + ~170 (new) = ~1033 tests passing.
 ```
 
 ---
@@ -1666,7 +1679,7 @@ Run full test suite. Expected: ~764 (existing) + ~170 (new) = ~934 tests passing
 - [ ] `core/integrations/linear/client.js` implements BugTrackerAdapter with full GraphQL operations
 - [ ] `core/engine/bug-detector.js` implements full detection pipeline
 - [ ] ~170 new tests passing across 6 test files
-- [ ] Total project tests: ~764 + ~170 = ~934 passing
+- [ ] Total project tests: ~863 + ~170 = ~1033 passing
 - [ ] No regressions in existing test suites
 - [ ] Bug Detector follows injectable dependency pattern (no direct imports of adapters)
 - [ ] Pipeline degrades gracefully (LLM failure → still creates bug; tracker failure → bug tracked internally)
