@@ -2,7 +2,7 @@
 
 **Spec:** `docs/bug-detector-adapters-implementation-spec.md` v2
 **Started:** 2026-02-12
-**Status:** In Progress
+**Status:** Complete
 
 ---
 
@@ -102,3 +102,23 @@ Created 5 error classes: EngineError, BugDetectorError, FixError, ApprovalError,
 
 **Test run:** 118/118 passing
 **Deviations:** None — copied from spec exactly
+
+---
+
+## Step 5: Full Suite Regression Check
+
+```
+Test Suites: 17 passed, 17 total
+Tests:       1028 passed, 1028 total
+```
+
+Breakdown: 863 existing + 165 new = 1028 total, 0 regressions.
+
+| Test File | Tests |
+|-----------|-------|
+| tests/integrations/adapters/bug-tracker.test.js | 5 |
+| tests/integrations/adapters/notification.test.js | 3 |
+| tests/integrations/adapters/llm.test.js | 3 |
+| tests/integrations/linear/client.test.js | 36 |
+| tests/engine/bug-detector.test.js | 118 |
+| **New tests total** | **165** |
