@@ -18,3 +18,25 @@ Created 5 error classes: EngineError, BugDetectorError, FixError, ApprovalError,
 
 **Lines:** 63
 **Deviations:** None — copied from spec exactly
+
+---
+
+## Step 2: Create Adapter Interfaces + Tests
+
+**Implementation files:**
+- `core/integrations/adapters/bug-tracker.js` — BugTrackerAdapter (4 abstract methods)
+- `core/integrations/adapters/notification.js` — NotificationAdapter (2 abstract methods)
+- `core/integrations/adapters/llm.js` — LLMAdapter (2 abstract methods: complete + streamComplete)
+
+**Test files:**
+- `tests/integrations/adapters/bug-tracker.test.js` — 5 tests
+- `tests/integrations/adapters/notification.test.js` — 3 tests
+- `tests/integrations/adapters/llm.test.js` — 3 tests
+
+**Verification:**
+- [x] All imports resolve: `require('../../engine/errors')` from adapters
+- [x] Each method throws AdapterError with correct `adapterType` and `operation`
+- [x] streamComplete is async generator (`async *`)
+
+**Test run:** 11/11 passing
+**Deviations:** None — copied from spec exactly
