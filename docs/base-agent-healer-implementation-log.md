@@ -45,3 +45,16 @@ Full implementation per Section 5:
 - Hook methods: `initialize()`, `cleanup()`, `analyzeResults()`, `generateReport()`
 - Utility: `resolveParams()` (4 template vars), `getScenarios()` (with tag filtering), `getAgentId()`
 - Private: `_computeSummary()`, `_generateSimpleId()`
+
+---
+
+## Step 4: Create agents/healer/agent.js
+
+**Status:** Complete
+**File:** `agents/healer/agent.js`
+**Class:** `HealerAgent extends BaseAgent`
+
+3 overrides per Section 6:
+- `initialize()` — calls `connector.healthCheck()`, throws ScenarioError if unhealthy
+- `analyzeResults()` — regression detection via knownIssues config, health score computation, isHealthy threshold check
+- `generateReport()` — adds healerSummary with healthScore, regressions, knownFailures
