@@ -32,11 +32,13 @@ function createMockEvidence(overrides = {}) {
     collectAll: jest.fn().mockResolvedValue({
       stepName: 'test_step',
       timestamp: '2026-02-11T00:00:00Z',
-      screenshot: '/evidence/test_step.png',
+      screenshots: { full: '/evidence/test_step_full.png', viewport: '/evidence/test_step_viewport.png' },
       consoleLogs: [],
       networkRequests: [],
       url: 'https://staging.example.com',
-      pageTitle: 'Test'
+      pageTitle: 'Test',
+      viewport: { width: 1280, height: 720 },
+      summary: { totalLogs: 0, errorLogs: 0, warnLogs: 0, totalRequests: 0, failedRequests: 0 }
     }),
     ...overrides
   };
@@ -234,7 +236,9 @@ describe('BaseConnector', () => {
       const result = await connector.collectEvidence('after_login');
       expect(evidence.collectAll).toHaveBeenCalledWith(page, 'after_login');
       expect(result).toHaveProperty('stepName', 'test_step');
-      expect(result).toHaveProperty('screenshot');
+      expect(result).toHaveProperty('screenshots');
+      expect(result.screenshots).toHaveProperty('full');
+      expect(result.screenshots).toHaveProperty('viewport');
       expect(result).toHaveProperty('consoleLogs');
       expect(result).toHaveProperty('networkRequests');
     });
