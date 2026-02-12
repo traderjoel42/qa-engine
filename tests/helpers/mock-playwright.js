@@ -6,7 +6,7 @@
  * Provides two categories of methods:
  * - Manual implementations: on/off/_emit (event emitter), screenshot (filesystem)
  * - Jest mocks: url, title, goto, click, fill, selectOption, waitForSelector,
- *   waitForLoadState, waitForTimeout, $, $$ (assertion-friendly)
+ *   waitForLoadState, waitForTimeout, waitForFunction, $, $$ (assertion-friendly)
  */
 function createMockPage(options = {}) {
   const listeners = {};
@@ -25,6 +25,7 @@ function createMockPage(options = {}) {
     waitForSelector: jest.fn().mockResolvedValue(undefined),
     waitForLoadState: jest.fn().mockResolvedValue(undefined),
     waitForTimeout: jest.fn().mockResolvedValue(undefined),
+    waitForFunction: jest.fn().mockResolvedValue(undefined),
     $: jest.fn().mockResolvedValue(null),
     $$: jest.fn().mockResolvedValue([]),
 
