@@ -3,7 +3,7 @@
 **Phase:** 1, Week 2, Day 5  
 **Purpose:** Implementation-ready spec for `core/engine/test-orchestrator.js`  
 **For:** Claude Code technical evaluation → implementation  
-**Dependencies:** BaseAgent (✅), HealerAgent (✅) — 156 tests, SentinelAgent (✅) — 98 tests, LibrarianAgent (✅) — tests passing, ConnectorFactory (✅) — 383 tests  
+**Dependencies:** BaseAgent + HealerAgent (✅), SentinelAgent (✅), LibrarianAgent (✅), ConnectorFactory (✅) — 764 tests total across 11 suites  
 **References:** qa-engine-01-overview-and-architecture.md, qa-engine-02-core-engine-spec.md, qa-engine-03-connector-pattern-spec.md, qa-engine-05-implementation-plan.md, docs/base-agent-healer-implementation-spec.md  
 
 ---
@@ -37,13 +37,18 @@ Caller (CLI / WhatsApp / Scheduler / API)
 
 **The orchestrator owns the connector lifecycle, not agents.** This is the key architectural boundary:
 
-- Orchestrator calls `ConnectorFactory.create()` once
+- Caller provides `page` (Playwright page instance) and `evidenceCollector` via run options
+- Orchestrator calls `ConnectorFactory.create(appConfig, page, evidenceCollector, { skipInitialize: true })` once
 - Orchestrator calls `connector.initialize()` once before any agents run
 - Same connector instance is passed to every agent
 - Orchestrator calls `connector.cleanup()` once after all agents finish
 - Agents call their own `agent.initialize()` / `agent.cleanup()` within this window
 
-**Why:** Agents share a single authenticated browser session. Re-creating connectors per agent would mean re-authenticating, re-navigating, and losing shared state. The connector is expensive; agents are cheap.
+**Why `skipInitialize: true`?** `ConnectorFactory.create()` auto-initializes by default (navigates to app, authenticates, verifies ready state). The orchestrator passes `{ skipInitialize: true }` so it can own the full lifecycle — this gives it clean error handling boundaries and ensures initialize errors are caught in the orchestrator's try/catch, not inside the factory.
+
+**Why page/evidenceCollector come from the caller?** The orchestrator coordinates agents; it doesn't manage browser infrastructure. The caller (CLI script, scheduler, WhatsApp bot) is responsible for creating the Playwright browser/page and configuring evidence storage. This keeps the orchestrator testable and free from Playwright import dependencies.
+
+**Why agents share a single session:** Re-creating connectors per agent would mean re-authenticating, re-navigating, and losing shared state. The connector is expensive; agents are cheap.
 
 ### Agent Registration Pattern
 
@@ -252,7 +257,7 @@ constructor(options = {})
 | `registerAgent(agentId, AgentClass, config)` | `void` | Register an agent for future runs |
 | `unregisterAgent(agentId)` | `boolean` | Remove a registered agent. Returns true if found. |
 | `getRegisteredAgents()` | `AgentRegistration[]` | List all registered agents |
-| `run(appConfig, options)` | `Promise<OrchestratorResult>` | Run selected agents (default: all) |
+| `run(appConfig, options)` | `Promise<OrchestratorResult>` | Run selected agents (default: all). **options.page** and **options.evidenceCollector** are required. |
 | `runAll(appConfig, options)` | `Promise<OrchestratorResult>` | Explicit alias: run every registered agent |
 | `runAgents(appConfig, agentIds, options)` | `Promise<OrchestratorResult>` | Run specific agents by ID |
 | `runByTag(appConfig, tag, options)` | `Promise<OrchestratorResult>` | Run agents matching a tag |
@@ -279,8 +284,8 @@ constructor(options = {})
 ```javascript
 'use strict';
 
-const ConnectorFactory = require('../../connectors/connector-factory');
-const { ConfigurationError, AgentError } = require('../../agents/errors');
+const ConnectorFactory = require('../../connectors/factory');
+const { ConfigurationError } = require('../../agents/errors');
 
 /**
  * Default no-op implementations for injectable dependencies.
@@ -490,6 +495,9 @@ class TestOrchestrator {
    * @param {Object} appConfig
    * @param {AgentRegistration[]} registrations
    * @param {Object} options
+   * @param {Object} options.page - Playwright page instance (required)
+   * @param {Object} options.evidenceCollector - EvidenceCollector instance (required)
+   * @param {string} [options.trigger='manual']
    * @returns {Promise<OrchestratorResult>}
    */
   async _executeRun(appConfig, registrations, options = {}) {
@@ -497,24 +505,36 @@ class TestOrchestrator {
     const trigger = options.trigger || 'manual';
     const startedAt = new Date().toISOString();
 
+    // Validate required execution environment
+    const { page, evidenceCollector } = options;
+    if (!page) {
+      throw new ConfigurationError('options.page (Playwright page instance) is required');
+    }
+    if (!evidenceCollector) {
+      throw new ConfigurationError('options.evidenceCollector is required');
+    }
+
     let connector = null;
     let connectorError = null;
     const agentResults = [];
 
-    // ── Step 1: Create and initialize connector ──
+    // ── Step 1: Create connector (skipInitialize so orchestrator owns lifecycle) ──
     try {
-      connector = await this._connectorFactory.create(appConfig);
+      connector = await this._connectorFactory.create(
+        appConfig, page, evidenceCollector, { skipInitialize: true }
+      );
     } catch (error) {
       return this._createConnectorErrorResult(
         runId, appConfig, error, startedAt, trigger, 'create'
       );
     }
 
+    // ── Step 2: Initialize connector (orchestrator-owned) ──
     try {
       await connector.initialize();
     } catch (error) {
       // Attempt cleanup even if initialize failed
-      try { await connector.cleanup(); } catch (_) { /* swallow */ }
+      try { await connector.cleanup(); } catch (_) { /* best-effort */ }
       return this._createConnectorErrorResult(
         runId, appConfig, error, startedAt, trigger, 'initialize'
       );
@@ -531,8 +551,10 @@ class TestOrchestrator {
       await connector.cleanup();
     } catch (error) {
       // Log but don't fail the run — cleanup is best-effort
-      connectorError = this._serializeError(error);
-      connectorError._phase = 'cleanup'; // Mark as cleanup-only error
+      connectorError = {
+        ...this._serializeError(error),
+        phase: 'cleanup'
+      };
     }
 
     // ── Step 4: Aggregate results ──
@@ -550,7 +572,7 @@ class TestOrchestrator {
       startedAt,
       completedAt,
       trigger,
-      connectorError: connectorError?._phase === 'cleanup' ? connectorError : null
+      connectorError: connectorError?.phase === 'cleanup' ? connectorError : null
     };
 
     // ── Step 5: Post-run hooks (all best-effort) ──
@@ -743,13 +765,13 @@ class TestOrchestrator {
     try {
       await this._storage.store(result);
     } catch (error) {
-      // Log but don't fail
+      // TODO Phase 2: Add structured logging. For now, swallow — hooks are best-effort.
     }
 
     try {
       await this._notifier.notify(result);
     } catch (error) {
-      // Log but don't fail
+      // TODO Phase 2: Add structured logging.
     }
 
     // Only invoke failureHandler if there were failures or errors
@@ -757,7 +779,7 @@ class TestOrchestrator {
       try {
         await this._failureHandler.handle(result);
       } catch (error) {
-        // Log but don't fail
+        // TODO Phase 2: Add structured logging.
       }
     }
   }
@@ -794,7 +816,7 @@ All runtime errors (agent crashes, connector crashes) are **caught and recorded*
 
 ### File: `tests/engine/test-orchestrator.test.js`
 
-Estimated: **~90 tests** organized into 10 `describe` blocks.
+Estimated: **~93 tests** organized into 10 `describe` blocks.
 
 ---
 
@@ -857,13 +879,15 @@ describe('TestOrchestrator - run() routing')
 
 ---
 
-### Block 4: runAll (8 tests)
+### Block 4: runAll (10 tests)
 
 ```
 describe('TestOrchestrator - runAll')
   ✓ runs all registered agents and returns OrchestratorResult
   ✓ throws ConfigurationError when no agents registered
-  ✓ creates connector via factory with appConfig
+  ✓ throws ConfigurationError when options.page is missing
+  ✓ throws ConfigurationError when options.evidenceCollector is missing
+  ✓ creates connector via factory with appConfig, page, evidenceCollector, { skipInitialize: true }
   ✓ initializes connector before running agents
   ✓ calls cleanup on connector after all agents finish
   ✓ passes same connector instance to all agents
@@ -923,7 +947,7 @@ describe('TestOrchestrator - Agent Error Isolation')
 
 ---
 
-### Block 8: Error Isolation — Connector Errors (8 tests)
+### Block 8: Error Isolation — Connector Errors (9 tests)
 
 ```
 describe('TestOrchestrator - Connector Error Isolation')
@@ -935,6 +959,7 @@ describe('TestOrchestrator - Connector Error Isolation')
   ✓ connector create error has phase 'create'
   ✓ connector initialize error has phase 'initialize'
   ✓ attempts connector cleanup even when initialize fails
+  ✓ factory.create() called with appConfig, page, evidenceCollector, { skipInitialize: true }
 ```
 
 ---
@@ -1078,6 +1103,7 @@ function createFailedTestRunResult(agentId) {
 ```javascript
 /**
  * Creates a mock ConnectorFactory with controllable behavior.
+ * Matches real ConnectorFactory.create(app, page, evidenceCollector, options) signature.
  */
 function createMockConnectorFactory(overrides = {}) {
   const mockConnector = {
@@ -1155,6 +1181,16 @@ const TEST_APP_CONFIG = {
   connector: { type: 'generic' },
   baseUrl: 'http://localhost:3000'
 };
+
+/**
+ * Mock page and evidenceCollector for run options.
+ * The real versions come from Playwright and EvidenceCollector —
+ * these stubs satisfy the orchestrator's validation check.
+ */
+const TEST_RUN_OPTIONS = {
+  page: { url: () => 'http://localhost:3000', close: jest.fn() },
+  evidenceCollector: { capture: jest.fn(), store: jest.fn() }
+};
 ```
 
 ---
@@ -1166,7 +1202,7 @@ const TEST_APP_CONFIG = {
 | `core/engine/test-orchestrator.js` | Orchestrator implementation | ~280 |
 | `tests/engine/test-orchestrator.test.js` | Test suite | ~700 |
 
-**Total:** ~980 LOC, ~90 tests
+**Total:** ~1000 LOC, ~93 tests
 
 ---
 
@@ -1176,7 +1212,7 @@ const TEST_APP_CONFIG = {
 ```
 Read these files to understand the patterns:
 - agents/errors.js (ConfigurationError import path)
-- connectors/connector-factory.js (ConnectorFactory.create API)
+- connectors/factory.js (ConnectorFactory.create API — note: create(app, page, evidenceCollector, options))
 - agents/base-agent.js (TestRunResult shape, agent lifecycle)
 - agents/healer/agent.js (concrete agent pattern for mock reference)
 - tests/agents/healer-agent.test.js (test structure, mock patterns)
@@ -1210,17 +1246,19 @@ npx jest tests/engine/test-orchestrator.test.js --verbose
 ```
 npx jest --verbose
 - Verify no regressions in existing tests
-- All 637+ existing tests should still pass
+- All 764 existing tests should still pass
 ```
 
 ### Step 6: Verify Integration Compatibility
 ```
-Verify that the orchestrator can actually coordinate with the real agent classes:
-- Create a quick integration smoke test (or manual check) that:
-  1. Creates orchestrator with real ConnectorFactory
+Verify that the orchestrator wires correctly with real classes (not just mocks):
+- Create a quick integration test that:
+  1. Creates orchestrator with the real ConnectorFactory
   2. Registers HealerAgent with a minimal config
-  3. Calls run() — it will fail at connector creation (no browser), which is fine
-  4. Confirms the error is a connector error, not an import/wiring error
+  3. Calls run(appConfig, { page: mockPage, evidenceCollector: mockCollector })
+  4. The factory will throw because mockPage isn't a real Playwright page
+  5. Confirms the result is a connector error with phase 'create' — not an import error or wiring error
+  6. This proves: import paths resolve, factory receives correct args, error isolation works
 ```
 
 ---
@@ -1228,12 +1266,14 @@ Verify that the orchestrator can actually coordinate with the real agent classes
 ## 10. Validation Criteria
 
 - [ ] `core/engine/test-orchestrator.js` exists and exports TestOrchestrator
-- [ ] `tests/engine/test-orchestrator.test.js` exists with ~90 tests
+- [ ] `tests/engine/test-orchestrator.test.js` exists with ~93 tests
 - [ ] All tests pass: `npx jest tests/engine/test-orchestrator.test.js --verbose`
-- [ ] No regressions: `npx jest --verbose` (all 637+ prior tests still pass)
+- [ ] No regressions: `npx jest --verbose` (all 764 prior tests still pass)
 - [ ] Constructor accepts and stores injectable dependencies
 - [ ] `registerAgent()` validates all arguments
 - [ ] `runAll()` creates connector once, passes to all agents, cleans up
+- [ ] `ConnectorFactory.create()` called with `(appConfig, page, evidenceCollector, { skipInitialize: true })`
+- [ ] Throws `ConfigurationError` when `options.page` or `options.evidenceCollector` missing
 - [ ] `runAgents()` throws on unknown IDs with helpful error message
 - [ ] `runByTag()` filters correctly, throws on no matches
 - [ ] Agent crash is caught, error result recorded, next agent runs
