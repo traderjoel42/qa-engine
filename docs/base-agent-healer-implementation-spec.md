@@ -125,7 +125,7 @@ class AgentError extends Error {
 
 class ScenarioError extends AgentError {
   constructor(message, details = {}) {
-    super(message, { ...details, phase: 'execute', recoverable: true });
+    super(message, { ...details, phase: details.phase || 'execute', recoverable: details.recoverable !== undefined ? details.recoverable : true });
     this.name = 'ScenarioError';
   }
 }
@@ -157,6 +157,8 @@ class ConfigurationError extends AgentError {
 
 **4 error classes.** AgentError is the base. ScenarioError for step failures (recoverable — skip scenario, continue others). AssertionError for failed assertions with expected/actual. ConfigurationError for bad config (fatal — abort agent).
 
+**Naming note:** `AssertionError` is intentionally spelled without the second "s" to avoid collision with Node.js's built-in `assert.AssertionError`. The misspelling is consistent throughout the codebase.
+
 ---
 
 ## 3. Complete Method Inventory
@@ -169,7 +171,7 @@ class ConfigurationError extends AgentError {
 | `initialize()` | HOOK | `async initialize() → void` | Agent-specific setup before test execution. Default: no-op. |
 | `runTests()` | IMPLEMENTED | `async runTests() → TestRunResult` | Iterate scenarios, execute steps, collect results. Core framework. |
 | `runScenario(scenario)` | IMPLEMENTED | `async runScenario(scenario) → ScenarioResult` | Execute single scenario's steps + assertions. |
-| `executeStep(step, scenarioContext)` | IMPLEMENTED | `async executeStep(step, ctx) → StepResult` | Execute single action via connector, with timing and error handling. |
+| `executeStep(step, stepIndex, scenarioContext)` | IMPLEMENTED | `async executeStep(step, stepIndex, ctx) → StepResult` | Execute single action via connector, with timing and error handling. |
 | `evaluateAssertions(assertions, scenarioContext)` | IMPLEMENTED | `async evaluateAssertions(assertions, ctx) → AssertionResult[]` | Run assertion checks against connector state and scenario context. |
 | `evaluateAssertion(assertion, scenarioContext)` | IMPLEMENTED | `async evaluateAssertion(assertion, ctx) → AssertionResult` | Single assertion evaluation dispatch. |
 | `analyzeResults(testRunResult)` | HOOK | `async analyzeResults(result) → Analysis` | Agent-specific result analysis. Default: pass/fail counts + duration. |
@@ -178,6 +180,7 @@ class ConfigurationError extends AgentError {
 | `resolveParams(params, scenarioContext)` | IMPLEMENTED | `resolveParams(params, ctx) → object` | Template variable replacement (e.g., `{{timestamp}}`, `{{uuid}}`). |
 | `getAgentId()` | IMPLEMENTED | `getAgentId() → string` | Returns `this.config.id` or constructor name as fallback. |
 | `getScenarios()` | IMPLEMENTED | `getScenarios() → Scenario[]` | Returns scenarios from config, with validation. |
+| `_executeScenarioSteps(scenario, steps, ctx)` | PRIVATE | `async _executeScenarioSteps(...) → void` | Internal: sequential step execution with skipped-step marking. Extracted for timeout wrapping. |
 
 ### 3.2 HealerAgent Methods (extends BaseAgent)
 
@@ -203,7 +206,7 @@ HealerAgent is intentionally thin — only 3 overrides. The smoke test execution
   id: 'create-project-story-session',       // unique within agent
   name: 'Create Project → Story → Session', // human-readable
   tags: ['smoke', 'critical'],              // for filtering
-  timeout: 60000,                           // optional per-scenario timeout (ms)
+  timeout: 60000,                           // optional per-scenario timeout (ms), default: config.scenarioTimeout or 120000
   steps: [
     {
       action: 'create_project',             // maps to connector.performAction()
@@ -282,6 +285,7 @@ BaseAgent supports these assertion types out of the box:
   failedSteps: [],          // subset of steps where status === 'failed'
   failedAssertions: [],     // subset of assertions where passed === false
   evidence: { ... },        // final evidence snapshot after scenario completes
+  error: null,              // AgentError if scenario crashed (status === 'error')
   durationMs: 5678,
   timestamp: '2026-02-12T10:00:00.000Z'
 }
@@ -290,7 +294,7 @@ BaseAgent supports these assertion types out of the box:
 Status logic:
 - `'passed'` — all steps passed AND all assertions passed
 - `'failed'` — at least one assertion failed (steps may have all passed but assertions caught an issue)
-- `'error'` — a step threw a non-recoverable error or the scenario timed out
+- `'error'` — a step threw a non-recoverable error, or the scenario timed out
 
 ### 4.6 TestRunResult
 
@@ -499,6 +503,7 @@ class BaseAgent {
    */
   async runScenario(scenario) {
     const startTime = Date.now();
+    const scenarioTimeout = scenario.timeout || this.config.scenarioTimeout || 120000;
     const steps = [];
     const scenarioContext = {
       scenarioId: scenario.id,
@@ -506,17 +511,43 @@ class BaseAgent {
       lastStepResult: null
     };
 
-    // Execute steps sequentially
-    for (let i = 0; i < scenario.steps.length; i++) {
-      const step = scenario.steps[i];
-      const stepResult = await this.executeStep(step, i, scenarioContext);
-      steps.push(stepResult);
-      scenarioContext.stepResults.push(stepResult);
-      scenarioContext.lastStepResult = stepResult;
+    // Wrap execution in a timeout
+    const executionPromise = this._executeScenarioSteps(scenario, steps, scenarioContext);
 
-      // If step failed and it's not recoverable, stop scenario
-      if (stepResult.status === 'failed' && stepResult.error && !stepResult.error.recoverable) {
-        break;
+    let timedOut = false;
+    const timeoutPromise = new Promise((_, reject) => {
+      const timer = setTimeout(() => {
+        timedOut = true;
+        reject(new ScenarioError(
+          `Scenario timed out after ${scenarioTimeout}ms`,
+          { agentId: this.getAgentId(), scenario: scenario.id, recoverable: false }
+        ));
+      }, scenarioTimeout);
+      // Store timer so we can clear it
+      executionPromise.finally(() => clearTimeout(timer));
+    });
+
+    try {
+      await Promise.race([executionPromise, timeoutPromise]);
+    } catch (error) {
+      if (timedOut) {
+        // Mark remaining unexecuted steps as skipped
+        for (let i = steps.length; i < scenario.steps.length; i++) {
+          steps.push({
+            stepIndex: i,
+            action: scenario.steps[i].action,
+            params: scenario.steps[i].params || {},
+            description: scenario.steps[i].description || null,
+            status: 'skipped',
+            result: null,
+            error: null,
+            evidence: null,
+            durationMs: 0,
+            timestamp: new Date().toISOString()
+          });
+        }
+      } else {
+        throw error; // Re-throw non-timeout errors
       }
     }
 
@@ -536,7 +567,7 @@ class BaseAgent {
 
     // Determine overall status
     let status;
-    if (steps.some(s => s.status === 'failed' && s.error && !s.error.recoverable)) {
+    if (timedOut || steps.some(s => s.status === 'failed' && s.error && !s.error.recoverable)) {
       status = 'error';
     } else if (failedAssertions.length > 0 || failedSteps.length > 0) {
       status = 'failed';
@@ -553,9 +584,51 @@ class BaseAgent {
       failedSteps,
       failedAssertions,
       evidence,
+      error: null,
       durationMs: Date.now() - startTime,
       timestamp: new Date().toISOString()
     };
+  }
+
+  /**
+   * Internal: execute scenario steps sequentially.
+   * Extracted to enable timeout wrapping in runScenario.
+   *
+   * @private
+   * @param {object} scenario
+   * @param {Array} steps - Mutated in place (pushed to)
+   * @param {object} scenarioContext - Mutated in place
+   * @returns {Promise<void>}
+   */
+  async _executeScenarioSteps(scenario, steps, scenarioContext) {
+    for (let i = 0; i < scenario.steps.length; i++) {
+      const step = scenario.steps[i];
+      const stepResult = await this.executeStep(step, i, scenarioContext);
+      steps.push(stepResult);
+      scenarioContext.stepResults.push(stepResult);
+      scenarioContext.lastStepResult = stepResult;
+
+      // If step failed and it's not recoverable, mark remaining as skipped and stop
+      if (stepResult.status === 'failed' && stepResult.error && !stepResult.error.recoverable) {
+        for (let j = i + 1; j < scenario.steps.length; j++) {
+          const skippedResult = {
+            stepIndex: j,
+            action: scenario.steps[j].action,
+            params: scenario.steps[j].params || {},
+            description: scenario.steps[j].description || null,
+            status: 'skipped',
+            result: null,
+            error: null,
+            evidence: null,
+            durationMs: 0,
+            timestamp: new Date().toISOString()
+          };
+          steps.push(skippedResult);
+          scenarioContext.stepResults.push(skippedResult);
+        }
+        break;
+      }
+    }
   }
 
   /**
@@ -1307,12 +1380,19 @@ describe('BaseAgent', () => {
     test('returns status "failed" when an assertion fails');
     test('returns status "failed" when a step fails but error is recoverable');
     test('returns status "error" when a step fails with non-recoverable error');
-    test('stops execution at non-recoverable step failure');
+    test('marks remaining steps as "skipped" after non-recoverable failure');
+    test('skipped steps have durationMs 0 and null result/error/evidence');
     test('continues past recoverable step failures');
     test('collects end-of-scenario evidence');
     test('evidence collection failure does not crash scenario');
     test('records durationMs');
     test('populates failedSteps and failedAssertions arrays');
+    test('times out when scenario exceeds timeout — status is "error"');
+    test('marks unexecuted steps as "skipped" on timeout');
+    test('uses scenario.timeout when provided');
+    test('uses config.scenarioTimeout as fallback');
+    test('uses 120000ms default when no timeout configured');
+    test('includes error field on ScenarioResult when crashed');
   });
 
   describe('runTests', () => {
@@ -1590,6 +1670,8 @@ const connector = createMockConnector({
 
 **Estimated totals:** ~1,910 lines across 8 files, ~100-120 tests.
 
+**Note on scenario config files:** Real scenario JSON files (e.g., `apps/brainstormy/scenarios/smoke-tests.json`, `apps/brainstormy/agents/healer.config.json`) are NOT part of this spec. They will be created during Week 2 Day 5 (Test Orchestrator) or during staging integration. All unit tests create config inline — no file I/O needed.
+
 ---
 
 ## 11. Implementation Steps (for Claude Code)
@@ -1661,6 +1743,10 @@ Create `docs/base-agent-healer-implementation-log.md` with test counts per suite
 7. **Template variables in `resolveParams()`** — `{{timestamp}}` and `{{uuid}}` make test data unique per run. This prevents collision when running tests repeatedly against the same app instance.
 
 8. **`_computeSummary` is private.** The leading underscore signals it's internal to BaseAgent. No subclass should need to override it.
+
+9. **Scenario timeout uses `Promise.race`.** `runScenario` races the step execution against a timeout promise. On timeout, remaining unexecuted steps are marked `'skipped'` and the scenario status becomes `'error'`. The timeout is cleared on normal completion to prevent lingering timers. For testing timeouts, use `jest.useFakeTimers()` or create a mock connector whose `performAction` returns a never-resolving promise.
+
+10. **Skipped steps are explicit.** After a non-recoverable step failure OR a timeout, all remaining unexecuted steps are pushed to the results array with `status: 'skipped'`. This ensures step counts in reports match the scenario definition and consumers don't need to infer missing steps.
 
 ---
 
