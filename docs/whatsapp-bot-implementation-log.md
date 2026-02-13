@@ -81,4 +81,22 @@
   - 47 tests across 9 describe blocks: constructor (8), createApp (4), health check (3), signature validation (4), authorization (4), message extraction (3), command routing (3), integration flow (5), validateSignature (7), start/stop (3), isAuthorized (3)
 - **Test count:** 47 tests passing (spec estimated ~42)
 - **Deviations:** None — implemented verbatim from spec
+- **Commit:** 83f53ff
+
+---
+
+## Step 5: Index + Wiring
+
+- **Files created:** `interfaces/whatsapp-bot/index.js`
+- **Status:** done
+- **Changes:**
+  - Created `createWhatsAppBot()` factory function that wires engine + notifier + config → WebhookServer
+  - Re-exports all modules: WebhookServer, MessageParser, CommandHandler, NotificationTemplates
+  - Ran all whatsapp-bot tests together: 193 tests across 4 test files all passing
+- **Test count (whatsapp-bot total):** 193 tests passing (spec estimated ~167)
+  - message-parser: 59
+  - notification-templates: 41
+  - command-handler: 46
+  - server: 47
+- **Deviations:** None
 - **Commit:** pending
