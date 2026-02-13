@@ -1,6 +1,6 @@
 # QA Engine: Day 5 Implementation Spec — Engine Factory, Configuration & Minimal CLI
 
-**Version:** 1.1 (post-feasibility review)  
+**Version:** 1.2 (post-feasibility review)  
 **Date:** February 12, 2026  
 **Depends on:** All Week 1–4 implementations (~1536 passing tests)  
 **Target:** ~72 new tests → Running total ~1608 tests
@@ -72,7 +72,7 @@ Day 5 is the **integration wiring layer** — the glue that assembles all standa
 
 **Decision:** Agent classes are registered with the TestOrchestrator inside `engine.run()`, just before calling `orchestrator.run()`. A default registry maps agent IDs to their classes (`healer` → `HealerAgent`, etc.). The registry is overridable via `createEngine({ agentRegistry })`.
 
-**Rationale:** The TestOrchestrator requires agents to be registered via `registerAgent(agentId, AgentClass)` before `run()` will work. Registering at run time (not at factory creation time) means only the requested agents are loaded, and the registry can be swapped for testing without modifying global state. The default registry covers the three built-in agents; Phase 3 custom agents would extend this registry.
+**Rationale:** The TestOrchestrator requires agents to be registered via `registerAgent(agentId, AgentClass, config)` before `run()` will work. Registering at run time (not at factory creation time) means only the requested agents are loaded, and the registry can be swapped for testing without modifying global state. The default registry covers the three built-in agents; Phase 3 custom agents would extend this registry.
 
 ---
 
@@ -550,16 +550,16 @@ class RuleBasedLLMAdapter extends LLMAdapter {
     const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
     
     return {
-      response: {
+      content: JSON.stringify({
         rootCause: 'Unable to determine — LLM not configured',
         severity: this._guessSeverity(text),
         category: this._guessCategory(text),
         autoFixable: false,
         suggestedFix: null,
         analysis: 'Rule-based classification (no LLM configured). Configure ANTHROPIC_API_KEY for AI-powered analysis.'
-      },
-      model: 'rule-based',
-      tokensUsed: 0
+      }),
+      usage: { inputTokens: 0, outputTokens: 0 },
+      model: 'rule-based'
     };
   }
   
@@ -630,7 +630,7 @@ class FailureHandler {
     
     for (const agentResult of agentResults) {
       const agentId = agentResult.agentId || 'unknown';
-      const failures = (agentResult.results || []).filter(
+      const failures = (agentResult.scenarios || []).filter(
         r => r.status === 'failed'
       );
       
@@ -781,7 +781,7 @@ async function createEngine(overrides = {}) {
       const agentRegistry = overrides.agentRegistry || defaultAgentRegistry;
       for (const agentId of agentIds) {
         if (agentRegistry[agentId]) {
-          orchestrator.registerAgent(agentId, agentRegistry[agentId]);
+          orchestrator.registerAgent(agentId, agentRegistry[agentId], appConfig.agents[agentId] || {});
         }
       }
       
@@ -1011,8 +1011,8 @@ module.exports = function statusCommand(program) {
         console.log(`Recent test runs (last ${runs.length}):\n`);
         
         for (const run of runs) {
-          const date = run.created_at
-            ? new Date(run.created_at).toLocaleString()
+          const date = run.started_at
+            ? new Date(run.started_at).toLocaleString()
             : 'unknown';
           const status = run.status || 'unknown';
           const app = run.app_id || 'unknown';
@@ -1633,7 +1633,7 @@ App Config Loading + Agent Registration (at engine.run() time):
   engine.run(appId)
     ├── loadAppConfig(appsDir, appId) [app-loader.js]
     │     └── reads apps/<appId>/app.config.json
-    ├── orchestrator.registerAgent(agentId, AgentClass) for each requested agent
+    ├── orchestrator.registerAgent(agentId, AgentClass, config) for each requested agent
     └── orchestrator.run(appConfig, { agentIds })
 ```
 
@@ -1655,7 +1655,7 @@ All fixes below were applied based on Claude Code's feasibility evaluation again
 | 4 | Wrong ConnectorFactory path + instantiation | Fixed path to `../../connectors/factory`, pass class reference (not `new ConnectorFactory()`) |
 | 5 | `RuleBasedLLMAdapter.analyze()` — BugDetector calls `complete()` | Renamed to `complete(prompt, options)` matching LLMAdapter base class |
 | 6 | `ConsoleNotificationAdapter.send(recipients)` — base uses singular | Changed to `send(recipient, message)` matching NotificationAdapter base |
-| 7 | FailureHandler assumed `result.failures` — actual is OrchestratorResult | Rewrote to iterate `result.agentResults[].results[]` filtering by `status === 'failed'` |
+| 7 | FailureHandler assumed `result.failures` — actual is OrchestratorResult | Rewrote to iterate `result.agentResults[].scenarios[]` filtering by `status === 'failed'` |
 | 8 | `detectAndReport()` 2nd arg is `agentId` string, not object | Changed to pass `agentId` string from `agentResult.agentId` |
 
 ### Moderate Fixes
@@ -1679,3 +1679,28 @@ All fixes below were applied based on Claude Code's feasibility evaluation again
 | 10 | LinearClient constructor — factory guards with `validation.services.bugTracker` |
 | 11 | `apps/brainstormy/app.config.json` — correctly specified in new files list |
 | 15 | `.env.example` — correctly specified in new files list |
+
+---
+
+## Appendix: Feasibility Review Changelog (v1.1 → v1.2)
+
+All fixes below were applied based on Claude Code's second feasibility evaluation against the actual codebase.
+
+### Critical Fixes
+
+| # | Issue | Fix Applied |
+|---|---|---|
+| 1 | `registerAgent()` requires 3 args — spec passed only 2 | Added `appConfig.agents[agentId] || {}` as third argument; updated rationale and flow diagram |
+| 2 | `RuleBasedLLMAdapter.complete()` return shape wrong — returned `{ response }` instead of `{ content }` | Changed to return `{ content: JSON.stringify({...}), usage: { inputTokens: 0, outputTokens: 0 }, model }` matching AnthropicAdapter |
+
+### Moderate Fixes
+
+| # | Issue | Fix Applied |
+|---|---|---|
+| 3 | Status command reads `run.created_at` but test_runs table has `started_at` | Changed to `run.started_at` |
+
+### Notes Applied
+
+| # | Issue | Fix Applied |
+|---|---|---|
+| 4 | FailureHandler iterates `agentResult.results` but _runAgent returns `scenarios` | Changed to `agentResult.scenarios`; updated v1.1 changelog entry #7 |
