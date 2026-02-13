@@ -1,6 +1,6 @@
 # QA Engine Week 5 Days 3-5: Real Brainstormy Connector & Scheduling
 
-**Version:** 1.1 (post-evaluation fixes)  
+**Version:** 1.2 (post-evaluation v2 fixes)  
 **Date:** February 13, 2026  
 **Author:** Joel (with Claude)  
 **Status:** Ready for Implementation  
@@ -238,7 +238,7 @@ All full tests plus:
 
 /**
  * @typedef {Object} BrainstormyConnectorConfig
- * @property {string} type - 'ai-chat-app' (matches existing connector type)
+ * @property {string} type - 'brainstormy' (resolves to BrainstormyConnector in ConnectorFactory)
  * @property {Object} config
  * @property {BrainstormyAuth} config.auth
  * @property {Object<string, string>} config.selectors - camelCase selector keys
@@ -445,15 +445,32 @@ VALUES
 > `createSession()`, `generateStoryBible()`, `performSearch()`, `createBookmark()`, `generateReport()`,
 > `extractCitations()`, etc.
 >
-> **Do NOT replace the file wholesale.** Instead, diff-merge the following additions:
+> **Do NOT replace the file wholesale.** Instead, diff-merge using these concrete decisions:
+>
+> **KEEP from existing file (do not overwrite):**
+> - `_extractIdFromUrl()` helper — existing uses this, spec inlines regex. Keep the helper.
+> - `waitForAIResponse()` override — decorates parent with citation extraction. Not in spec, must preserve.
+> - `extractCitations()` method — used by waitForAIResponse. Not in spec, must preserve.
+> - `ConnectorError` usage from `../errors` — keep structured errors, don't downgrade to plain `Error`.
+>
+> **ADD from spec (new functionality):**
 > 1. Constructor state tracking (`currentProjectId`, `currentStoryId`, `currentSessionId`, `createdEntities`)
 > 2. Clerk-specific authentication flow in `authenticate()`
 > 3. `cleanup()` method with entity archiving
 > 4. `setupTestProject()` and `archiveTestData()` methods
-> 5. `getEnvironment()` update for multi-environment support
+> 5. `getEnvironment()` with multi-environment support
+> 6. `getSelector()` override for `connector.config.selectors` path resolution
+> 7. `waitForAppReady()` override for `readyIndicator` resolution
+> 8. New `performAction()` cases: `end_session`, `get_bible`, `get_report`, `get_bookmarks`, `setup_test_project`, `archive_test_data`
+>
+> **RECONCILE (existing + spec differ):**
+> - Selector key casing: Existing uses snake_case (`'bible_tab'`), spec uses camelCase (`'bibleTab'`).
+>   **Decision:** Convert to camelCase to match `app.config.json`. Update all `getSelector()` calls.
+> - `createProject()/createStory()/createSession()`: Keep existing `_extractIdFromUrl()` calls,
+>   but add the `this.currentProjectId = id` state tracking from the spec.
 >
 > The code below shows the complete target state. Claude Code should compare against the existing file
-> and apply only the missing pieces.
+> and merge following the decisions above.
 
 ### File: `connectors/brainstormy/connector.js`
 
@@ -1176,6 +1193,27 @@ class BrainstormyConnector extends AIAppConnector {
   }
 
   /**
+   * Override getSelector() to resolve from connector.config.selectors path.
+   *
+   * BaseConnector.getSelector() reads this.app.config?.selectors?.[key], but our
+   * config puts selectors at this.app.connector.config.selectors. This override
+   * checks the correct path first, then falls back to DEFAULT_SELECTORS from
+   * the selectors.js defaults file.
+   *
+   * @param {string} key - Selector key in camelCase (e.g., 'chatInput')
+   * @returns {string} CSS selector string
+   */
+  getSelector(key) {
+    // 1. Config selectors (highest priority — overridable per-deployment)
+    const configSelector = this.app.connector?.config?.selectors?.[key];
+    if (configSelector) return configSelector;
+
+    // 2. Default selectors from selectors.js (fallback)
+    const DEFAULT_SELECTORS = require('./selectors');
+    return DEFAULT_SELECTORS[key] || null;
+  }
+
+  /**
    * Get a timeout value from config.
    * Config uses camelCase keys (e.g., aiResponse, bibleGeneration).
    * @param {string} key - Timeout key in camelCase
@@ -1207,6 +1245,20 @@ class BrainstormyConnector extends AIAppConnector {
     } catch (error) {
       await this.collectEvidence(`timeout_waiting_for_${selector}`);
       throw error;
+    }
+  }
+
+  /**
+   * Override waitForAppReady() from GenericWebAppConnector.
+   *
+   * The base class reads this.app.config?.ready_indicator, but our config
+   * stores the ready indicator as a selector key in connector.config.selectors.
+   * This override resolves it via getSelector() which checks the correct path.
+   */
+  async waitForAppReady() {
+    const readySelector = this.getSelector('readyIndicator');
+    if (readySelector) {
+      await this.waitForSelector(readySelector, this.getTimeout('navigation'));
     }
   }
 
@@ -1327,7 +1379,7 @@ module.exports = DEFAULT_SELECTORS;
 > `GenericWebAppConnector`, and the existing BrainstormyConnector (422 lines). 
 > Key differences from the original spec draft: uses `id` (not `app_id`), `baseUrl` (not nested `environments`),
 > auth under `connector.config.auth`, selectors under `connector.config.selectors` with camelCase keys,
-> and `connector.type: "ai-chat-app"` (not `"brainstormy"`).
+> and `connector.type: "brainstormy"` (so ConnectorFactory resolves to BrainstormyConnector, not AIAppConnector).
 
 ```json
 {
@@ -1337,7 +1389,7 @@ module.exports = DEFAULT_SELECTORS;
   "baseUrl": "https://staging.brainstormy.app",
 
   "connector": {
-    "type": "ai-chat-app",
+    "type": "brainstormy",
     "config": {
       "auth": {
         "type": "email_password",
@@ -1891,18 +1943,7 @@ class Scheduler extends EventEmitter {
       schedule.app_id,
       since
     );
-
-    // NOTE: getRunsSince() must be added to TestRunRepository.
-    // BaseRepository.findMany() only supports simple WHERE key = value,
-    // but this query needs a date comparison. Implementation:
-    //
-    //   getRunsSince(appId, sinceIso) {
-    //     return this.connection.db.prepare(
-    //       `SELECT * FROM test_runs
-    //        WHERE app_id = ? AND started_at >= ?
-    //        ORDER BY started_at DESC`
-    //     ).all(appId, sinceIso);
-    //   }
+    // See Part 8b: TestRunRepository Extension for the required getRunsSince() method
 
     if (runs.length === 0) {
       await this.notifier.send(
@@ -2319,31 +2360,127 @@ echo "   Start with: npm run start:scheduler"
 
 ---
 
+## Part 8b: TestRunRepository Extension
+
+> **Required change:** The Scheduler's daily digest calls `testRunRepo.getRunsSince()`, which does not
+> exist on `TestRunRepository` today. `BaseRepository.findMany()` only supports simple equality in
+> `_buildWhere()` — it cannot do `started_at >= ?`. This follows the pattern of the existing
+> `getPassRate()` method in TestRunRepository which also uses raw SQL for date comparisons.
+
+### Addition to: `core/database/repositories/test-run-repository.js`
+
+```javascript
+  /**
+   * Get test runs for an app since a given timestamp.
+   * Used by Scheduler.sendDailyDigest() to aggregate last 24h results.
+   *
+   * @param {string} appId - App ID to filter by
+   * @param {string} sinceIso - ISO timestamp lower bound (inclusive)
+   * @returns {TestRun[]}
+   */
+  getRunsSince(appId, sinceIso) {
+    return this.connection.db.prepare(
+      `SELECT * FROM test_runs
+       WHERE app_id = ? AND started_at >= ?
+       ORDER BY started_at DESC`
+    ).all(appId, sinceIso);
+  }
+```
+
+### Tests for getRunsSince() (add to existing test-run-repository test file)
+
+```javascript
+describe('getRunsSince()', () => {
+  test('returns runs after the given timestamp');
+  test('filters by app_id');
+  test('returns empty array when no runs match');
+  test('orders results by started_at descending');
+});
+```
+
+> **Test count impact:** +4 tests (total now 75, up from 71).
+
+---
+
 ## Part 9: WhatsApp Bot Schedule Commands
 
 These commands extend the WhatsApp bot from Days 1-2 to support schedule management.
 
 > **Integration with existing WhatsApp architecture:**
 > The WhatsApp bot uses `MessageParser.parse()` → `CommandHandler.handle()` pipeline.
-> `MessageParser` has fixed regex-based routing with priority order.
+> `MessageParser` has fixed regex-based routing with priority order (if/else chain):
+> approval → help → status → bugs → run → unknown.
 >
-> **Required integration steps:**
-> 1. Add schedule command patterns to `MessageParser.parse()`:
->    ```javascript
->    // In MessageParser — add to pattern list (after existing patterns):
->    { pattern: /^schedules$/i, type: 'schedule', command: 'list' },
->    { pattern: /^pause\s+(.+)/i, type: 'schedule', command: 'pause' },
->    { pattern: /^resume\s+(.+)/i, type: 'schedule', command: 'resume' },
->    { pattern: /^(.+)\s+now$/i, type: 'schedule', command: 'run_now' },
->    { pattern: /^change\s+(.+)\s+to\s+(.+)/i, type: 'schedule', command: 'update_cron' },
->    { pattern: /^digest$/i, type: 'schedule', command: 'digest' },
->    ```
-> 2. In `CommandHandler.handle()`, add routing for `type: 'schedule'`:
->    ```javascript
->    case 'schedule':
->      return await this.scheduleHandler.handle(parsed.raw);
->    ```
-> 3. Inject `ScheduleHandler` into `CommandHandler` constructor.
+> **⚠️ Collision risk:** The existing run pattern `/^(?:run|test)(?:\s+(.+))?$/i` would match
+> "run nightly now" before schedule patterns are checked. Schedule patterns MUST be inserted
+> BEFORE the run pattern in the priority chain.
+>
+> **Required changes to `interfaces/whatsapp-bot/message-parser.js`:**
+>
+> ```javascript
+> // INSERT THESE CHECKS before the existing run/test pattern check.
+> // The order matters — "run X now" must match schedule before generic "run X".
+>
+> // Schedule: "schedules" (list all)
+> if (/^schedules$/i.test(text)) {
+>   return { type: 'schedule', command: 'list', raw: text };
+> }
+>
+> // Schedule: "pause <name>"
+> const pauseMatch = text.match(/^pause\s+(.+)/i);
+> if (pauseMatch) {
+>   return { type: 'schedule', command: 'pause', name: pauseMatch[1].trim(), raw: text };
+> }
+>
+> // Schedule: "resume <name>"
+> const resumeMatch = text.match(/^resume\s+(.+)/i);
+> if (resumeMatch) {
+>   return { type: 'schedule', command: 'resume', name: resumeMatch[1].trim(), raw: text };
+> }
+>
+> // Schedule: "<name> now" or "run <name> now" (MUST come before generic "run" pattern)
+> const runNowMatch = text.match(/^(?:run\s+)?(.+?)\s+now$/i);
+> if (runNowMatch) {
+>   return { type: 'schedule', command: 'run_now', name: runNowMatch[1].trim(), raw: text };
+> }
+>
+> // Schedule: "change <name> to <cron>"
+> const changeMatch = text.match(/^change\s+(.+?)\s+to\s+(.+)/i);
+> if (changeMatch) {
+>   return { type: 'schedule', command: 'update_cron', name: changeMatch[1].trim(),
+>            cron: changeMatch[2].trim(), raw: text };
+> }
+>
+> // Schedule: "digest"
+> if (/^digest$/i.test(text)) {
+>   return { type: 'schedule', command: 'digest', raw: text };
+> }
+>
+> // ... THEN the existing run/test pattern follows ...
+> ```
+>
+> **Required changes to `interfaces/whatsapp-bot/command-handler.js`:**
+>
+> ```javascript
+> // 1. Add to constructor:
+> constructor({ orchestrator, notifier, scheduler, ...other }) {
+>   // ... existing setup ...
+>   this.scheduleHandler = new ScheduleHandler(scheduler);
+> }
+>
+> // 2. Add case to handle() switch:
+> case 'schedule':
+>   return await this.scheduleHandler.handle(parsed.raw);
+> ```
+>
+> **Required import in command-handler.js:**
+> ```javascript
+> const ScheduleHandler = require('./handlers/schedule-handler');
+> ```
+>
+> **Test impact:** Existing WhatsApp bot tests (193 total) should still pass since new patterns
+> are additive. Add 2-3 tests verifying "run nightly now" routes to schedule handler (not run handler)
+> and "run full" still routes to the existing run handler.
 >
 > The `ScheduleHandler.canHandle()` method below is retained for standalone use and testing,
 > but in production, routing is handled by `MessageParser`.
@@ -2764,7 +2901,7 @@ describe('ScheduledRunRepository', () => {
 });
 ```
 
-**Total test target: 71 tests**
+**Total test target: 75 tests (71 original + 4 getRunsSince)**
 
 ---
 
@@ -2965,7 +3102,7 @@ node -e "
 const c = require('./apps/brainstormy/app.config.json');
 console.log(c.id === 'brainstormy' ? 'PASS' : 'FAIL', '- id');
 console.log(c.baseUrl ? 'PASS' : 'FAIL', '- baseUrl');
-console.log(c.connector.type === 'ai-chat-app' ? 'PASS' : 'FAIL', '- connector type');
+console.log(c.connector.type === 'brainstormy' ? 'PASS' : 'FAIL', '- connector type');
 console.log(c.connector.config.auth ? 'PASS' : 'FAIL', '- auth config');
 console.log(c.connector.config.selectors.chatInput ? 'PASS' : 'FAIL', '- selectors (camelCase)');
 "
@@ -3019,6 +3156,17 @@ console.log(typeof p.goto === 'function' ? 'PASS' : 'FAIL', '- mock page');
 
 ### Day 5: Scheduler + Cron (Steps 11-16)
 
+**Pre-requisite:** Install dependencies and register repository
+```bash
+# Install node-cron (required before Step 13)
+npm install node-cron
+
+# Add ScheduledRunRepository to core/database/index.js:
+#   const ScheduledRunRepository = require('./repositories/scheduled-run-repository');
+#   // In createDatabase() return block:
+#   scheduledRuns: new ScheduledRunRepository(connection),
+```
+
 **Step 11:** Create `core/database/migrations/002_scheduled_runs.sql` and verify
 ```bash
 # Create migration file, then run database init (Migrator applies it automatically)
@@ -3035,6 +3183,13 @@ console.log(tables.length > 0 ? 'PASS' : 'FAIL', '- scheduled_runs table created
 ```bash
 npm test -- tests/database/scheduled-run-repository.test.js
 # Expected: 10 tests pass
+```
+
+**Step 12b:** Add `getRunsSince()` to `core/database/repositories/test-run-repository.js`
+```bash
+# Add method (see Part 8b), then run tests
+npm test -- tests/database/test-run-repository.test.js
+# Expected: existing tests still pass + 4 new getRunsSince tests
 ```
 
 **Step 13:** Implement `core/scheduler.js`
@@ -3083,7 +3238,7 @@ npm test -- tests/connectors/brainstormy-connector.test.js \
             tests/whatsapp-bot/schedule-handler.test.js \
             tests/database/scheduled-run-repository.test.js
 
-# Expected: 71 tests, 71 passing
+# Expected: 75 tests, 75 passing
 ```
 
 ---
@@ -3138,7 +3293,8 @@ npm test -- tests/connectors/brainstormy-connector.test.js \
 - [ ] 22 Scheduler tests passing
 - [ ] 14 ScheduleHandler tests passing
 - [ ] 10 ScheduledRunRepository tests passing
-- [ ] Total: 71 tests passing
+- [ ] 4 TestRunRepository.getRunsSince tests passing
+- [ ] Total: 75 tests passing
 - [ ] All mock factories functional
 
 ---
@@ -3198,7 +3354,7 @@ This section documents all changes made after Claude Code's feasibility evaluati
 
 | ID | Issue | Fix Applied |
 |---|---|---|
-| **M1** | app.config.json structural mismatch (nested environments, snake_case, wrong field names) | Rewrote config to match existing shape: `id` not `app_id`, `baseUrl` top-level, `connector.type: "ai-chat-app"`, auth under `connector.config.auth`, camelCase selectors/timeouts. Updated all connector methods (`getEnvironment()`, `getTimeout()`, `authenticate()`, `navigate()`) and all `getSelector()` calls to use camelCase keys. |
+| **M1** | app.config.json structural mismatch (nested environments, snake_case, wrong field names) | Rewrote config to match existing shape: `id` not `app_id`, `baseUrl` top-level, `connector.type: "brainstormy"`, auth under `connector.config.auth`, camelCase selectors/timeouts. Updated all connector methods (`getEnvironment()`, `getTimeout()`, `authenticate()`, `navigate()`) and all `getSelector()` calls to use camelCase keys. |
 | **M2** | ScheduledRunModel bypasses BaseRepository pattern | Rewritten as `ScheduledRunRepository extends BaseRepository` with `connection` wrapper. Registered in `createDatabase()` as `db.scheduledRuns`. Updated mock test-db to provide connection wrapper. |
 | **M3** | Missing database migration file | Added `core/database/migrations/002_scheduled_runs.sql` with proper migration file convention. Updated Step 11 to use `createDatabase()` which runs Migrator automatically. |
 | **M4** | `testRunModel.getRunsSince()` doesn't exist | Added implementation note with the SQL query that must be added to `TestRunRepository`. |
@@ -3229,3 +3385,18 @@ This section documents all changes made after Claude Code's feasibility evaluati
 | `ai_response` (timeout) | `aiResponse` | camelCase consistency |
 | `clerk_email_input` (selector) | `clerkEmailInput` | camelCase consistency |
 | All snake_case selectors | All camelCase selectors | Matches existing `connector.config.selectors` |
+
+---
+
+### Changes from v1.1 → v1.2 (Post-Evaluation v2 Fixes)
+
+| ID | Issue | Fix Applied |
+|---|---|---|
+| **C1** | `connector.type: "ai-chat-app"` causes factory to create AIAppConnector instead of BrainstormyConnector | Changed to `connector.type: "brainstormy"` in app.config.json, typedef, Step 5 verification, and Appendix D note. |
+| **M1** | `TestRunRepository.getRunsSince()` needed but only had inline comment, no tests | Added Part 8b with full method implementation, 4 test specs, and Step 12b. Updated total test target from 71 → 75. |
+| **M2** | `BaseConnector.getSelector()` reads `this.app.config?.selectors` but config puts selectors at `this.app.connector.config.selectors` | Added `getSelector()` override in BrainstormyConnector that resolves from `connector.config.selectors` with fallback to `DEFAULT_SELECTORS`. |
+| **M3** | Diff-merge guidance was too vague for 422-line existing file with overlapping methods | Expanded to concrete KEEP/ADD/RECONCILE decisions covering `_extractIdFromUrl()`, `waitForAIResponse()`, `extractCitations()`, `ConnectorError`, and selector casing. |
+| **M4** | WhatsApp schedule patterns could collide with existing `run` command (`"run nightly now"` matches run before schedule) | Replaced integration notes with diff-ready code blocks. Schedule patterns explicitly placed BEFORE existing run pattern. Added `"run X now"` collision prevention regex. Added test guidance for routing verification. |
+| **m1** | `waitForAppReady()` reads `this.app.config?.ready_indicator` but spec puts it in selectors | Added `waitForAppReady()` override in BrainstormyConnector that resolves `readyIndicator` via `getSelector()`. |
+| **m2** | `createDatabase()` needs `scheduledRuns` repository added | Added explicit pre-requisite step in Day 5 with import + return block reminder. |
+| **m3** | `npm install node-cron` not sequenced before Step 13 | Added as Day 5 pre-requisite before Step 11. |
