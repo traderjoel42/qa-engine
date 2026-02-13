@@ -64,4 +64,21 @@
   - 46 tests across 11 describe blocks: constructor (4), routing (9), handleRun (7), handleStatus (3), handleBugs (3), handleApprove (5), handleReject (5), handleInfo (5), handleHelp (1), handleUnknown (2), error handling (2)
 - **Test count:** 46 tests passing (spec estimated ~45)
 - **Deviations:** None — implemented verbatim from spec
+- **Commit:** 2a6435b
+
+---
+
+## Step 4: WebhookServer + Tests
+
+- **Files created:** `interfaces/whatsapp-bot/server.js`, `tests/whatsapp-bot/server.test.js`
+- **Status:** done
+- **Changes:**
+  - Installed `supertest` as devDependency for HTTP-level testing
+  - Created WebhookServer class with Express app, Twilio signature validation (HMAC-SHA1), sender authorization, message parsing/routing, and health check
+  - Webhook always returns 200 to Twilio even on errors (prevents retries)
+  - Empty TwiML `<Response></Response>` responses (all replies sent via REST API)
+  - `validateSignature()` uses timing-safe comparison via `crypto.timingSafeEqual`
+  - 47 tests across 9 describe blocks: constructor (8), createApp (4), health check (3), signature validation (4), authorization (4), message extraction (3), command routing (3), integration flow (5), validateSignature (7), start/stop (3), isAuthorized (3)
+- **Test count:** 47 tests passing (spec estimated ~42)
+- **Deviations:** None — implemented verbatim from spec
 - **Commit:** pending
