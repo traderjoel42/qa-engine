@@ -300,16 +300,67 @@ async function createEngine(overrides = {}) {
       const agentRegistry = overrides.agentRegistry || defaultAgentRegistry;
       for (const agentId of agentIds) {
         if (agentRegistry[agentId]) {
-          orchestrator.registerAgent(agentId, agentRegistry[agentId], appConfig.agents[agentId] || {});
+          const agentConfig = appConfig.agents?.[agentId] || {};
+
+          // Load scenarios from referenced files
+          if (agentConfig.scenarioFiles && Array.isArray(agentConfig.scenarioFiles)) {
+            const path = require('path');
+            const fs = require('fs');
+            agentConfig.scenarios = [];
+
+            for (const scenarioFile of agentConfig.scenarioFiles) {
+              const filePath = path.resolve(appsDir, appId, scenarioFile);
+              if (fs.existsSync(filePath)) {
+                const loaded = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                const scenarios = Array.isArray(loaded) ? loaded : (loaded.scenarios || [loaded]);
+                agentConfig.scenarios.push(...scenarios);
+              }
+            }
+          }
+
+          orchestrator.registerAgent(agentId, agentRegistry[agentId], agentConfig);
         }
       }
 
-      const result = await orchestrator.run(appConfig, {
-        ...options,
-        agentIds
-      });
+      // Create browser and evidence collector if not provided
+      let browser = null;
+      let manageBrowser = false;
 
-      return result;
+      if (!options.page) {
+        const { chromium } = require('playwright');
+        browser = await chromium.launch({ headless: true });
+        const context = await browser.newContext({
+          viewport: { width: 1280, height: 720 }
+        });
+        options.page = await context.newPage();
+        manageBrowser = true;
+      }
+
+      if (!options.evidenceCollector) {
+        const EvidenceCollector = require('./evidence-collector');
+        const runId = `run-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+        const evidenceCollector = new EvidenceCollector({
+          runId,
+          appId,
+          basePath: './evidence'
+        });
+        await evidenceCollector.initialize(options.page);
+        options.evidenceCollector = evidenceCollector;
+        options.runId = runId;
+      }
+
+      try {
+        const result = await orchestrator.run(appConfig, {
+          ...options,
+          agentIds
+        });
+
+        return result;
+      } finally {
+        if (manageBrowser && browser) {
+          await browser.close();
+        }
+      }
     },
 
     async status(options = {}) {
