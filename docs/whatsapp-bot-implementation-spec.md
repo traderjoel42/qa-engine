@@ -85,18 +85,37 @@ async bugInfo(approvalId) {
 
 This keeps the `_internals` boundary clean — the WhatsApp bot never reaches through to `engine._internals.approvalManager` directly.
 
-**Implementation note — status() return shape:** The current `engine.status()` returns a flat `Array<TestRunRecord>` from the database. This spec expects `{ activeRuns: [], recentRuns: [] }`. **Enhance `engine.status()` in factory.js** to split runs into `activeRuns` (status='running') and `recentRuns` (completed in last 24h, capped at 10):
+**Implementation note — status() return shape:** The current `engine.status()` returns a flat `Array<TestRunRecord>` from the database. The WhatsApp bot needs `{ activeRuns: [], recentRuns: [] }`. **Enhance `engine.status()` in factory.js** to accept an optional `options` parameter and return the structured shape, while remaining backward-compatible with the CLI's existing usage (`engine.status({ limit })` which iterates the result as an array).
 
 ```javascript
 // Replace the existing status() in createEngine() factory
-async status() {
-  const allRuns = await db.testRuns.findMany({ limit: 20 });
+// findMany(where, options) — first arg is where clause, second is options
+async status(options = {}) {
+  const limit = options.limit || 20;
+  const allRuns = db.testRuns.findMany({}, { orderBy: { started_at: 'DESC' }, limit });
   return {
     activeRuns: allRuns.filter(r => r.status === 'running'),
     recentRuns: allRuns.filter(r => r.status !== 'running').slice(0, 10)
   };
 }
 ```
+
+**CLI migration:** The existing `cli/commands/status.js` calls `engine.status({ limit })` and iterates the result as a flat array. **Update `cli/commands/status.js`** to destructure the new return shape:
+
+```javascript
+// Before (cli/commands/status.js):
+const runs = await engine.status({ limit });
+if (runs.length === 0) { ... }
+for (const run of runs) { ... }
+
+// After:
+const { activeRuns, recentRuns } = await engine.status({ limit });
+const runs = [...activeRuns, ...recentRuns];
+if (runs.length === 0) { ... }
+for (const run of runs) { ... }
+```
+
+Update `tests/cli/status-command.test.js` mock return values to match the new shape (`{ activeRuns: [...], recentRuns: [...] }` instead of flat arrays).
 
 ### D4: Stateless Webhook Handler
 
@@ -1077,8 +1096,11 @@ class NotificationTemplates {
       if (bug.evidence.screenshots && bug.evidence.screenshots.length > 0) {
         lines.push(`• Screenshots: ${bug.evidence.screenshots.length}`);
       }
-      lines.push(`• Console errors: ${bug.evidence.console_errors || 0}`);
-      lines.push(`• Network failures: ${bug.evidence.network_failures || 0}`);
+      // Evidence stores raw arrays — derive counts on the fly
+      const consoleErrors = (bug.evidence.console_logs || []).filter(l => l.level === 'error').length;
+      const networkFailures = (bug.evidence.network_requests || []).filter(r => r.failed).length;
+      lines.push(`• Console errors: ${consoleErrors}`);
+      lines.push(`• Network failures: ${networkFailures}`);
     }
 
     if (bug.external_issue_url) {
@@ -1327,9 +1349,16 @@ class CommandHandler {
 
   /**
    * Handle 'approve' — route YES to Approval Manager.
+   * engine.approve() returns { action: 'approved', ... } on success,
+   * or { action: 'error', message } if not found / already responded / timed out.
    */
   async handleApprove(params, message) {
     const result = await this.engine.approve(params.approvalId);
+    if (result.action !== 'approved') {
+      const errorMsg = `⚠️ ${result.message || 'Could not approve: ' + params.approvalId}`;
+      await this.notifier.send(message.from, errorMsg);
+      return { success: false, message: errorMsg, data: result };
+    }
     const responseMessage = NotificationTemplates.approvalConfirmation(
       params.approvalId,
       'approved'
@@ -1340,9 +1369,16 @@ class CommandHandler {
 
   /**
    * Handle 'reject' — route NO to Approval Manager.
+   * engine.reject() returns { action: 'rejected', ... } on success,
+   * or { action: 'error', message } if not found / already responded / timed out.
    */
   async handleReject(params, message) {
     const result = await this.engine.reject(params.approvalId);
+    if (result.action !== 'rejected') {
+      const errorMsg = `⚠️ ${result.message || 'Could not reject: ' + params.approvalId}`;
+      await this.notifier.send(message.from, errorMsg);
+      return { success: false, message: errorMsg, data: result };
+    }
     const responseMessage = NotificationTemplates.approvalConfirmation(
       params.approvalId,
       'rejected'
@@ -1353,17 +1389,20 @@ class CommandHandler {
 
   /**
    * Handle 'info' — fetch and send detailed bug info.
+   * engine.bugInfo() delegates to ApprovalManager.handleResponse('INFO-...'),
+   * which returns { action, approval_id, message, bug, approval } on success,
+   * or { action: 'error', message } on failure.
    */
   async handleInfo(params, message) {
-    const bug = await this.engine.bugInfo(params.approvalId);
-    if (!bug) {
-      const notFoundMsg = `❓ No bug found for approval ID: ${params.approvalId}`;
+    const result = await this.engine.bugInfo(params.approvalId);
+    if (result.action === 'error' || !result.bug) {
+      const notFoundMsg = `❓ ${result.message || 'No bug found for approval ID: ' + params.approvalId}`;
       await this.notifier.send(message.from, notFoundMsg);
       return { success: false, message: notFoundMsg };
     }
-    const responseMessage = NotificationTemplates.bugDetail(bug);
+    const responseMessage = NotificationTemplates.bugDetail(result.bug);
     await this.notifier.send(message.from, responseMessage);
-    return { success: true, message: responseMessage, data: bug };
+    return { success: true, message: responseMessage, data: result.bug };
   }
 
   /**
@@ -1832,7 +1871,7 @@ describe('NotificationTemplates', () => {
 
 ### File: `tests/whatsapp-bot/command-handler.test.js`
 
-**Target: ~38 tests**
+**Target: ~45 tests**
 
 ```
 describe('CommandHandler', () => {
@@ -1880,18 +1919,26 @@ describe('CommandHandler', () => {
 
   describe('handleApprove()', () => {
     test('calls engine.approve() with approval ID')
-    test('sends approved confirmation')
+    test('sends approved confirmation when result.action is "approved"')
+    test('sends error message when approval not found (action: "error")')
+    test('sends error message when already approved (action: "error")')
+    test('returns success: false on error cases')
   })
 
   describe('handleReject()', () => {
     test('calls engine.reject() with approval ID')
-    test('sends rejected confirmation')
+    test('sends rejected confirmation when result.action is "rejected"')
+    test('sends error message when approval not found (action: "error")')
+    test('sends error message when already responded (action: "error")')
+    test('returns success: false on error cases')
   })
 
   describe('handleInfo()', () => {
     test('calls engine.bugInfo() with approval ID')
-    test('sends formatted bug detail')
-    test('sends not-found message when bug is null')
+    test('unwraps result.bug and sends formatted bug detail')
+    test('sends error message when result.action is "error"')
+    test('sends error message when result.bug is null')
+    test('returns success: false on error cases')
   })
 
   describe('handleHelp()', () => {
@@ -2011,11 +2058,11 @@ describe('WebhookServer', () => {
 | `tests/engine/factory.test.js` (new methods) | ~10 |
 | `tests/whatsapp-bot/message-parser.test.js` | ~52 |
 | `tests/whatsapp-bot/notification-templates.test.js` | ~28 |
-| `tests/whatsapp-bot/command-handler.test.js` | ~38 |
+| `tests/whatsapp-bot/command-handler.test.js` | ~45 |
 | `tests/whatsapp-bot/server.test.js` | ~42 |
-| **Total new tests** | **~170** |
+| **Total new tests** | **~177** |
 | **Prior project tests** | **~1,500+** |
-| **Project total after** | **~1,670+** |
+| **Project total after** | **~1,677+** |
 
 ---
 
@@ -2062,36 +2109,41 @@ function createMockEngine(overrides = {}) {
     bugs: jest.fn().mockResolvedValue([]),
 
     approve: jest.fn().mockResolvedValue({ 
-      action: 'YES',
+      action: 'approved',
       approval_id: 'ABC-247',
-      message: 'Fix approved',
-      status: 'approved' 
+      message: 'Fix approved'
     }),
 
     reject: jest.fn().mockResolvedValue({ 
-      action: 'NO',
+      action: 'rejected',
       approval_id: 'ABC-247',
-      message: 'Fix rejected',
-      status: 'rejected' 
+      message: 'Fix rejected'
     }),
 
+    // bugInfo delegates to handleResponse('INFO-...') which returns the full response envelope
     bugInfo: jest.fn().mockResolvedValue({
-      bug_id: 'BUG-248',
-      title: 'Memory recall failed',
-      severity: 'medium',
-      category: 'memory',
-      detected_by: 'Sentinel',
-      root_cause: 'Search query mismatch',
-      affected_component: 'services/semantic-search.js',
-      fix_approach: 'Update query weighting',
+      action: 'info',
       approval_id: 'ABC-248',
-      approval_status: 'pending',
-      created_at: new Date().toISOString(),
-      evidence: {
-        screenshots: ['screenshot-001.png'],
-        console_errors: 0,
-        network_failures: 1
-      }
+      message: 'Bug details retrieved',
+      bug: {
+        bug_id: 'BUG-248',
+        title: 'Memory recall failed',
+        severity: 'medium',
+        category: 'memory',
+        detected_by: 'Sentinel',
+        root_cause: 'Search query mismatch',
+        affected_component: 'services/semantic-search.js',
+        fix_approach: 'Update query weighting',
+        approval_id: 'ABC-248',
+        approval_status: 'pending',
+        created_at: new Date().toISOString(),
+        evidence: {
+          screenshots: ['screenshot-001.png'],
+          console_logs: [],
+          network_requests: [{ url: '/api/search', failed: true }]
+        }
+      },
+      approval: { id: 'ABC-248', status: 'pending' }
     }),
 
     ...overrides
@@ -2216,7 +2268,7 @@ Verify: `npx jest tests/whatsapp-bot/notification-templates.test.js --verbose` �
 
 Create `interfaces/whatsapp-bot/command-handler.js` and `tests/whatsapp-bot/command-handler.test.js`. Uses mock engine and mock notifier.
 
-Verify: `npx jest tests/whatsapp-bot/command-handler.test.js --verbose` — ~38 tests passing.
+Verify: `npx jest tests/whatsapp-bot/command-handler.test.js --verbose` — ~45 tests passing.
 
 ### Step 4: WebhookServer + Tests
 
@@ -2228,13 +2280,13 @@ Verify: `npx jest tests/whatsapp-bot/server.test.js --verbose` — ~42 tests pas
 
 Create `interfaces/whatsapp-bot/index.js` with `createWhatsAppBot()` factory and all exports.
 
-Verify: All 4 test files pass together: `npx jest tests/whatsapp-bot/ --verbose` — ~160 tests.
+Verify: All 4 test files pass together: `npx jest tests/whatsapp-bot/ --verbose` — ~167 tests.
 
 ### Step 6: Full Regression
 
 Run the complete test suite: `npx jest --verbose`
 
-Verify: ~1,670+ tests passing (including new factory tests), zero regressions.
+Verify: ~1,677+ tests passing (including new factory tests), zero regressions.
 
 ### Implementation Log
 
@@ -2257,7 +2309,7 @@ After each step, append to `docs/whatsapp-bot-implementation-log.md`:
 - [ ] `interfaces/whatsapp-bot/command-handler.js` exists routing all 8 command types
 - [ ] `interfaces/whatsapp-bot/server.js` exists with Express app, signature validation, authorization
 - [ ] `interfaces/whatsapp-bot/index.js` exports `createWhatsAppBot`, all classes
-- [ ] ~160 new tests passing in `tests/whatsapp-bot/`
+- [ ] ~167 new tests passing in `tests/whatsapp-bot/`
 - [ ] Signature validation uses timing-safe HMAC-SHA1 comparison
 - [ ] Authorization checks sender against allowlist
 - [ ] All commands parse case-insensitively
@@ -2266,7 +2318,7 @@ After each step, append to `docs/whatsapp-bot-implementation-log.md`:
 - [ ] `engine.bugs(appId, options)` called with two parameters (appId first, options second)
 - [ ] `engine.run()` is fire-and-forget (not awaited in webhook handler)
 - [ ] Webhook always returns 200 to Twilio (even on errors)
-- [ ] No regressions: `npx jest --verbose` — all ~1,670+ tests pass
+- [ ] No regressions: `npx jest --verbose` — all ~1,677+ tests pass
 - [ ] Implementation log updated at `docs/whatsapp-bot-implementation-log.md`
 
 **Manual validation (after Week 4 concrete adapters are wired):**
