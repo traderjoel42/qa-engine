@@ -49,6 +49,33 @@ class AdapterError extends EngineError {
     super(message, { code: 'ADAPTER_ERROR', ...options });
     this.adapterType = options.adapterType || 'unknown'; // 'bug_tracker', 'notification', 'llm'
     this.operation = options.operation || null;
+    this.cause = options.cause || null;
+  }
+}
+
+class DatabaseError extends EngineError {
+  constructor(message, options = {}) {
+    super(message, { code: options.code || 'DB_ERROR', details: options.details || null });
+    this.cause = options.cause || null;
+  }
+}
+
+class ConnectionError extends DatabaseError {
+  constructor(message, options = {}) {
+    super(message, { ...options, code: options.code || 'CONNECTION_ERROR' });
+  }
+}
+
+class MigrationError extends DatabaseError {
+  constructor(message, options = {}) {
+    super(message, { ...options, code: options.code || 'MIGRATION_ERROR' });
+  }
+}
+
+class StateManagerError extends EngineError {
+  constructor(message, options = {}) {
+    super(message, { code: options.code || 'STATE_ERROR', details: options.details || null });
+    this.cause = options.cause || null;
   }
 }
 
@@ -57,5 +84,9 @@ module.exports = {
   BugDetectorError,
   FixError,
   ApprovalError,
-  AdapterError
+  AdapterError,
+  DatabaseError,
+  ConnectionError,
+  MigrationError,
+  StateManagerError
 };
