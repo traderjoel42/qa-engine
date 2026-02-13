@@ -237,3 +237,27 @@
 - **Deviations:**
   - Test count 23 vs spec estimate of 14 — additional tests for canHandle edge cases, digest command, findScheduleByName, and routing collisions
   - Added `isScheduleCommand()` to MessageParser for routing (spec said routing handled by MessageParser)
+
+---
+
+## Step 16: Setup scripts and pre-deploy hook
+
+- **Files created:** `scripts/pre-deploy.sh`, `scripts/setup-scheduler.sh`
+- **Status:** done
+- **Changes:**
+  - `pre-deploy.sh`: Git pre-push hook that runs `node cli/index.js test --app brainstormy --mode smoke --quiet`, blocks push on failure, skippable with `--no-verify`
+  - `setup-scheduler.sh`: Initializes database (runs migrations), seeds 3 default schedules (Nightly Full Suite at 2AM, Weekly Regression at 3AM Sunday, Daily Digest at 8AM), idempotent (skips if schedules already exist)
+  - Both scripts made executable (`chmod +x`)
+  - Verification: `bash -n` syntax check passes for both scripts
+- **Deviations:** None — implemented verbatim from spec
+
+---
+
+## Final Summary
+
+- **Steps completed:** 1–16 (all done)
+- **New test count:** 83 new tests (39 connector + 10 repository + 4 getRunsSince + 30 scheduler + 20 schedule handler + 3 routing - spec target was 75)
+- **Total tests passing:** 1,840 (43 test suites)
+- **Files created:** 11 new files
+- **Files modified:** 9 existing files
+- **No regressions across entire test suite**
