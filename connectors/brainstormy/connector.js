@@ -62,11 +62,65 @@ class BrainstormyConnector extends AIAppConnector {
   // ===================================================================
 
   /**
-   * Initialize: navigate to staging URL, authenticate via Clerk,
+   * Override base getBaseURL() which reads environments[env].url (wrong key).
+   * Our config uses baseUrl at both top-level and environment level.
+   */
+  getBaseURL() {
+    const env = this.app.activeEnvironment ?? 'staging';
+    return this.app.environments?.[env]?.baseUrl || this.app.baseUrl;
+  }
+
+  /**
+   * Wake up the target service if it's been idle (Render cold start).
+   * Performs a plain HTTP GET with generous timeout before browser nav.
+   *
+   * NOTE: The 'timeout' option on https.get() sets the socket inactivity timeout,
+   * not a hard deadline. For Render cold starts where the TCP connection succeeds
+   * but the HTTP response takes 30-60s, this works because the socket remains
+   * active during the server startup. If the connection itself hangs (no TCP
+   * handshake), we add an explicit setTimeout as a hard deadline.
+   */
+  async warmUp() {
+    const url = this.getBaseURL();
+    const timeoutMs = this.getTimeout('warmUp') || 120000;
+
+    console.log(`Warming up ${url} (timeout: ${timeoutMs / 1000}s)...`);
+    const start = Date.now();
+
+    try {
+      const https = require('https');
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
+
+        const req = https.get(url, { timeout: timeoutMs }, (res) => {
+          res.resume(); // Drain response
+          clearTimeout(deadline);
+          settle(resolve, res.statusCode);
+        });
+        req.on('timeout', () => { req.destroy(); clearTimeout(deadline); settle(reject, new Error('Warm-up timeout')); });
+        req.on('error', (err) => { clearTimeout(deadline); settle(reject, err); });
+
+        // Hard deadline fallback in case socket timeout doesn't fire
+        const deadline = setTimeout(() => { req.destroy(); settle(reject, new Error('Warm-up hard deadline')); }, timeoutMs + 5000);
+      });
+
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      console.log(`  Service ready (${elapsed}s)`);
+    } catch (err) {
+      console.warn(`  Warm-up warning: ${err.message} — proceeding anyway`);
+    }
+  }
+
+  /**
+   * Initialize: warm up service, navigate to staging URL, authenticate via Clerk,
    * verify dashboard loads.
    */
   async initialize() {
     const env = this.getEnvironment();
+
+    // Wake up Render service before browser navigation
+    await this.warmUp();
 
     // Navigate to app
     await this.page.goto(env.baseUrl, { waitUntil: 'networkidle' });
