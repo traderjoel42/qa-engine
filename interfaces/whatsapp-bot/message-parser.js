@@ -46,13 +46,18 @@ class MessageParser {
       return { type: 'bugs', params: bugs };
     }
 
-    // 5. Run
+    // 5. Schedule commands (before run to avoid "run nightly now" → run handler)
+    if (this.isScheduleCommand(trimmed)) {
+      return { type: 'schedule', params: { originalText: trimmed } };
+    }
+
+    // 6. Run
     const run = this.parseRunCommand(trimmed);
     if (run) {
       return { type: 'run', params: run };
     }
 
-    // 6. Unknown
+    // 7. Unknown
     return { type: 'unknown', params: { originalText: trimmed } };
   }
 
@@ -117,6 +122,26 @@ class MessageParser {
     const match = body.match(/^(?:(open|fixed|all)\s+)?(?:bugs|what\s+failed\??)$/i);
     if (!match) return null;
     return { status: match[1] ? match[1].toLowerCase() : 'open' };
+  }
+
+  /**
+   * Check if a message is a schedule command.
+   * Matches: "schedules", "pause <name>", "resume <name>", "run <name> now",
+   * "<name> now", "change <name> to <cron>", "next run", "digest"
+   * @param {string} body
+   * @returns {boolean}
+   */
+  isScheduleCommand(body) {
+    const lower = body.toLowerCase();
+    return (
+      lower === 'schedules' ||
+      lower.startsWith('pause ') ||
+      lower.startsWith('resume ') ||
+      /\bnow$/i.test(lower) ||
+      lower.startsWith('change ') ||
+      lower === 'next run' ||
+      lower === 'digest'
+    );
   }
 
   /**

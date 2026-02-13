@@ -314,5 +314,25 @@ describe('MessageParser', () => {
         params: { originalText: 'hello there' }
       });
     });
+
+    // Schedule routing collision tests
+    test('run nightly now → schedule (not run)', () => {
+      const result = parser.parse('run nightly now');
+      expect(result.type).toBe('schedule');
+      expect(result.params.originalText).toBe('run nightly now');
+    });
+
+    test('run full → run (not schedule)', () => {
+      const result = parser.parse('run full');
+      expect(result.type).toBe('run');
+      expect(result.params.mode).toBe('full');
+    });
+
+    test('schedules → schedule', () => {
+      expect(parser.parse('schedules')).toEqual({
+        type: 'schedule',
+        params: { originalText: 'schedules' }
+      });
+    });
   });
 });

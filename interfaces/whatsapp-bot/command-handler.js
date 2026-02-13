@@ -1,6 +1,7 @@
 'use strict';
 
 const NotificationTemplates = require('./notification-templates');
+const ScheduleHandler = require('./handlers/schedule-handler');
 
 class CommandHandler {
   /**
@@ -9,13 +10,14 @@ class CommandHandler {
    * @param {Object} options.notifier - NotificationAdapter for sending responses
    * @param {string} options.defaultAppId - Default app to target
    */
-  constructor({ engine, notifier, defaultAppId = 'brainstormy' }) {
+  constructor({ engine, notifier, scheduler, defaultAppId = 'brainstormy' }) {
     if (!engine) throw new Error('CommandHandler requires engine');
     if (!notifier) throw new Error('CommandHandler requires notifier');
 
     this.engine = engine;
     this.notifier = notifier;
     this.defaultAppId = defaultAppId;
+    this.scheduleHandler = scheduler ? new ScheduleHandler(scheduler) : null;
   }
 
   /**
@@ -39,6 +41,8 @@ class CommandHandler {
           return await this.handleReject(command.params, message);
         case 'info':
           return await this.handleInfo(command.params, message);
+        case 'schedule':
+          return await this.handleSchedule(command.params, message);
         case 'help':
           return await this.handleHelp(message);
         case 'unknown':
@@ -173,6 +177,21 @@ class CommandHandler {
     const responseMessage = NotificationTemplates.bugDetail(result.bug);
     await this.notifier.send(message.from, responseMessage);
     return { success: true, message: responseMessage, data: result.bug };
+  }
+
+  /**
+   * Handle 'schedule' — delegate to ScheduleHandler.
+   */
+  async handleSchedule(params, message) {
+    if (!this.scheduleHandler) {
+      const msg = '⚠️ Scheduler not configured.';
+      await this.notifier.send(message.from, msg);
+      return { success: false, message: msg };
+    }
+
+    const result = await this.scheduleHandler.handle(params.originalText);
+    await this.notifier.send(message.from, result.text);
+    return { success: true, message: result.text };
   }
 
   /**

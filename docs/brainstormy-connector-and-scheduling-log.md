@@ -217,3 +217,23 @@
 - **Deviations:**
   - Test count 30 vs spec estimate of 22 — more thorough coverage
   - Added `--forceExit` flag needed due to node-cron background timers; mitigated with afterEach cleanup
+
+---
+
+## Step 15: Implement WhatsApp Schedule Handler
+
+- **Files created:** `interfaces/whatsapp-bot/handlers/schedule-handler.js`, `tests/whatsapp-bot/schedule-handler.test.js`
+- **Files modified:** `interfaces/whatsapp-bot/command-handler.js`, `interfaces/whatsapp-bot/message-parser.js`, `tests/whatsapp-bot/message-parser.test.js`
+- **Status:** done
+- **Changes:**
+  - Created `ScheduleHandler` class with: `canHandle()`, `handle()`, `listSchedules()`, `pauseSchedule()`, `resumeSchedule()`, `runNow()`, `updateCron()`, `findScheduleByName()`
+  - Commands: `schedules`, `pause <name>`, `resume <name>`, `run <name> now`, `change <name> to <cron>`, `digest`, `next run`
+  - Added `isScheduleCommand()` to MessageParser — inserted BEFORE `parseRunCommand()` to prevent "run nightly now" from matching as a run command
+  - Added `schedule` case to CommandHandler switch, `handleSchedule()` method, `ScheduleHandler` import, optional `scheduler` constructor param
+  - 20 schedule handler tests: canHandle (8), handle (9), findScheduleByName (3)
+  - 3 routing collision tests in message-parser: "run nightly now" → schedule, "run full" → run, "schedules" → schedule
+- **Test count:** 23 new tests (20 handler + 3 routing)
+- **Regression check:** All 1,840 tests passing (43 test suites)
+- **Deviations:**
+  - Test count 23 vs spec estimate of 14 — additional tests for canHandle edge cases, digest command, findScheduleByName, and routing collisions
+  - Added `isScheduleCommand()` to MessageParser for routing (spec said routing handled by MessageParser)
