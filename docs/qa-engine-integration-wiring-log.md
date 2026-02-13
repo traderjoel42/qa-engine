@@ -37,4 +37,14 @@
 - **Files created:** `cli/index.js`, `cli/commands/test.js`, `cli/commands/status.js`, `cli/commands/bugs.js`
 - **Status:** done
 - **Deviations:** None — implemented verbatim from spec sections 4.5-4.8. Made cli/index.js executable.
-- **Commit:** (see below)
+- **Commit:** b95ac3b
+
+---
+
+## Step 5: Create app config, .env.example, and package.json updates
+
+- **Files created:** `apps/brainstormy/app.config.json`, `.env.example`
+- **Files modified:** `package.json`
+- **Status:** done
+- **Deviations:** None — implemented verbatim from spec sections 4.9 and 4.10
+- **Commit:** (pending)

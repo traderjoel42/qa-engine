@@ -3,8 +3,12 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
+  "bin": {
+    "qa-engine": "./cli/index.js"
+  },
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "qa": "node cli/index.js"
   },
   "keywords": [],
   "author": "",

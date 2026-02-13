@@ -1,0 +1,41 @@
+{
+  "id": "brainstormy",
+  "name": "Brainstormy",
+  "type": "ai-chat-app",
+  "baseUrl": "https://staging.brainstormy.app",
+
+  "connector": {
+    "type": "ai-chat-app",
+    "config": {
+      "auth": {
+        "type": "email_password",
+        "credentials": {
+          "email": "testbot@brainstormy.app",
+          "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
+        }
+      },
+      "selectors": {
+        "chatInput": "[data-testid='chat-input']",
+        "chatSend": "[data-testid='send-button']",
+        "aiMessage": "[data-testid='ai-message']",
+        "generatingIndicator": "[data-testid='generating']",
+        "loginEmail": "[name='email']",
+        "loginPassword": "[name='password']",
+        "loginSubmit": "[type='submit']",
+        "authIndicator": "[data-testid='user-menu']",
+        "readyIndicator": "[data-testid='app-loaded']"
+      },
+      "timeouts": {
+        "aiResponse": 60000,
+        "bibleGeneration": 120000,
+        "navigation": 30000
+      }
+    }
+  },
+
+  "agents": {
+    "healer": { "enabled": true },
+    "sentinel": { "enabled": true },
+    "librarian": { "enabled": true }
+  }
+}
