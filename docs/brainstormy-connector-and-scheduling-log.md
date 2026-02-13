@@ -59,3 +59,16 @@
   - `factory.getRegisteredTypes()` returns `['generic', 'ai-chat-app', 'brainstormy']` — PASS
   - No modifications needed
 - **Deviations:** None
+
+---
+
+## Step 5: Create app.config.json
+
+- **Files modified:** `apps/brainstormy/app.config.json`
+- **Status:** done
+- **Changes:**
+  - Replaced existing config (had `connector.type: "ai-chat-app"` and snake_case selectors)
+  - New config has `connector.type: "brainstormy"`, 43 camelCase selectors, 7 timeouts, 2 environments (staging/production)
+  - Added `auth.required: true` and `testProjectName: "QA Test Project"`
+  - Verification: All 5 checks PASS (id, baseUrl, connector type, auth config, camelCase selectors)
+- **Deviations:** None — implemented verbatim from spec

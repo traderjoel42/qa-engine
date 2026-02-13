@@ -5,37 +5,93 @@
   "baseUrl": "https://staging.brainstormy.app",
 
   "connector": {
-    "type": "ai-chat-app",
+    "type": "brainstormy",
     "config": {
       "auth": {
         "type": "email_password",
+        "required": true,
         "credentials": {
           "email": "testbot@brainstormy.app",
           "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
         }
       },
       "selectors": {
-        "chatInput": "[data-testid='chat-input']",
-        "chatSend": "[data-testid='send-button']",
-        "aiMessage": "[data-testid='ai-message']",
-        "generatingIndicator": "[data-testid='generating']",
-        "loginEmail": "[name='email']",
-        "loginPassword": "[name='password']",
-        "loginSubmit": "[type='submit']",
-        "authIndicator": "[data-testid='user-menu']",
-        "readyIndicator": "[data-testid='app-loaded']"
+        "clerkEmailInput": "input[name=\"identifier\"], input[type=\"email\"]",
+        "clerkPasswordInput": "input[name=\"password\"], input[type=\"password\"]",
+        "clerkSubmitButton": "button[data-localization-key=\"formButtonPrimary\"], button[type=\"submit\"]",
+        "userMenu": "[data-testid=\"user-menu\"], [data-testid=\"user-button\"]",
+        "logoutButton": "[data-testid=\"logout-button\"], button:has-text(\"Sign out\")",
+        "sidebarProjects": "[data-testid=\"sidebar-projects\"], a[href=\"/projects\"]",
+        "storySidebarItem": "[data-testid=\"story-nav-item\"], .sidebar-story-link",
+        "newProjectButton": "[data-testid=\"new-project-button\"], button:has-text(\"New Project\")",
+        "projectNameInput": "[data-testid=\"project-name-input\"], input[name=\"project-name\"]",
+        "createProjectSubmit": "[data-testid=\"create-project-button\"], button[type=\"submit\"]",
+        "newStoryButton": "[data-testid=\"new-story-button\"], button:has-text(\"New Story\")",
+        "storyNameInput": "[data-testid=\"story-name-input\"], input[name=\"story-name\"]",
+        "storyVerticalSelect": "[data-testid=\"story-vertical-select\"], select[name=\"vertical\"]",
+        "createStorySubmit": "[data-testid=\"create-story-button\"], button[type=\"submit\"]",
+        "newSessionButton": "[data-testid=\"new-session-button\"], button:has-text(\"New Session\")",
+        "sessionTypeSelect": "[data-testid=\"session-type-select\"], select[name=\"session-type\"]",
+        "createSessionSubmit": "[data-testid=\"create-session-button\"], button[type=\"submit\"]",
+        "sessionList": "[data-testid=\"session-list\"], .session-list",
+        "sessionItem": "[data-testid=\"session-item\"], .session-list-item",
+        "endSessionButton": "[data-testid=\"end-session-button\"], button:has-text(\"End Session\")",
+        "chatInput": "[data-testid=\"chat-input\"], textarea[placeholder*=\"message\"]",
+        "chatSend": "[data-testid=\"send-button\"], button[aria-label=\"Send\"]",
+        "aiMessage": "[data-testid=\"ai-message\"], .message-assistant",
+        "userMessage": "[data-testid=\"user-message\"], .message-user",
+        "generatingIndicator": "[data-testid=\"generating\"], .streaming-indicator",
+        "searchInput": "[data-testid=\"search-input\"], input[placeholder*=\"Search\"]",
+        "searchSubmit": "[data-testid=\"search-submit\"]",
+        "searchResults": "[data-testid=\"search-results\"], .search-results",
+        "searchResultItem": "[data-testid=\"search-result-item\"], .search-result",
+        "bibleTab": "[data-testid=\"bible-tab\"], a[href*=\"bible\"], button:has-text(\"Story Bible\")",
+        "bibleTemplateSelect": "[data-testid=\"bible-template-select\"], select[name=\"template\"]",
+        "bibleGenerateButton": "[data-testid=\"bible-generate\"], button:has-text(\"Generate\")",
+        "bibleSection": "[data-testid=\"bible-section\"], .bible-section",
+        "bibleGeneratingIndicator": "[data-testid=\"bible-generating\"], .bible-progress",
+        "reportTab": "[data-testid=\"report-tab\"], a[href*=\"reports\"]",
+        "reportTypeSelect": "[data-testid=\"report-type-select\"], select[name=\"report-type\"]",
+        "reportGenerateButton": "[data-testid=\"report-generate\"], button:has-text(\"Generate\")",
+        "reportContent": "[data-testid=\"report-content\"], .report-content",
+        "reportCitation": "[data-citation-id], .citation-link",
+        "bookmarkButton": "[data-testid=\"bookmark-button\"], button[aria-label=\"Bookmark\"]",
+        "bookmarkTitleInput": "[data-testid=\"bookmark-title-input\"], input[name=\"bookmark-title\"]",
+        "bookmarkSaveButton": "[data-testid=\"bookmark-save\"], button:has-text(\"Save\")",
+        "bookmarksTab": "[data-testid=\"bookmarks-tab\"], a[href*=\"bookmarks\"]",
+        "bookmarkItem": "[data-testid=\"bookmark-item\"], .bookmark-list-item",
+        "sessionSummaryContent": "[data-testid=\"session-summary\"], .session-summary-content",
+        "readyIndicator": "[data-testid=\"app-loaded\"], #app-root"
       },
       "timeouts": {
         "aiResponse": 60000,
         "bibleGeneration": 120000,
-        "navigation": 30000
-      }
+        "reportGeneration": 90000,
+        "navigation": 30000,
+        "search": 15000,
+        "sessionSummary": 60000,
+        "clerkAuth": 30000
+      },
+      "testProjectName": "QA Test Project"
     }
   },
 
-  "agents": {
-    "healer": { "enabled": true },
-    "sentinel": { "enabled": true },
-    "librarian": { "enabled": true }
+  "environments": {
+    "staging": {
+      "baseUrl": "https://staging.brainstormy.app",
+      "auth": {
+        "credentials": {
+          "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
+        }
+      }
+    },
+    "production": {
+      "baseUrl": "https://brainstormy.app",
+      "auth": {
+        "credentials": {
+          "passwordEnv": "BRAINSTORMY_PROD_TEST_PASSWORD"
+        }
+      }
+    }
   }
 }
