@@ -173,3 +173,47 @@
 - **Test count:** 4 new tests (53 total in repositories.test.js)
 - **Regression check:** All 128 database tests passing (6 test suites)
 - **Deviations:** None — implemented verbatim from spec
+
+---
+
+## Step 13: Implement Scheduler (core/scheduler.js)
+
+- **Files created:** `core/scheduler.js`
+- **Status:** done
+- **Changes:**
+  - Created `Scheduler extends EventEmitter` (384 lines)
+  - Constructor: accepts `scheduledRunRepo`, `orchestrator`, `notifier`, `testRunRepo`, `loadAppConfig`, `defaultRecipient`
+  - State: `activeTasks` (Map), `executing` (Set), `running` (boolean)
+  - Core methods: `start()`, `stop()`, `registerTask()`, `executeSchedule()`, `formatCompletionMessage()`, `sendDailyDigest()`
+  - Management methods: `createSchedule()`, `pauseSchedule()`, `resumeSchedule()`, `runNow()`, `updateCron()`, `listSchedules()`
+  - Events emitted: `schedule:started`, `schedule:completed`, `schedule:error`, `digest:sent`
+  - Uses `node-cron` for task scheduling, validates cron expressions before registering
+  - Prevents concurrent execution of the same schedule via `this.executing` Set
+  - `executeSchedule()` routes `test_mode === 'digest'` to `sendDailyDigest()` before emitting `schedule:started`
+  - Calls `this.orchestrator.run(appConfig, options)` — NOT `runTests()` (as per spec critical notes)
+  - Repository calls are synchronous (matching SQLite/better-sqlite3 pattern)
+  - Verification: `node -e "require('./core/scheduler')"` — loads without error
+- **Deviations:** None — implemented verbatim from spec
+
+---
+
+## Step 14: Write scheduler tests
+
+- **Files created:** `tests/core/scheduler.test.js`
+- **Status:** done
+- **Changes:**
+  - 30 tests across 6 describe blocks:
+    - `start()` (4): loads schedules, registers tasks, sets running flag, warns if already running
+    - `stop()` (3): stops all tasks, clears map, sets running false
+    - `registerTask()` (4): validates cron, logs error for invalid, stops existing before re-register, creates task
+    - `executeSchedule()` (9): prevents concurrent, start notification, orchestrator.run call, updates tracking, completion notify, notify_only_failures, error handling, finally cleanup, digest routing
+    - `sendDailyDigest()` (4): aggregates runs, formats message, zero runs, emits event
+    - Schedule management (6): create, pause, resume, runNow, updateCron, list
+  - Mock factories: `createMockScheduledRunRepo()`, `createMockOrchestrator()`, `createMockNotifier()`, `createMockTestRunRepo()`, `createMockSchedule()`
+  - Added `activeSchedulers` array + `afterEach` cleanup to prevent Jest hanging from open cron handles
+  - Fixed `console.error` assertion — scheduler passes single template literal string, not two arguments
+- **Test count:** 30 tests passing (spec estimated 22)
+- **Regression check:** All 1,817 tests passing (42 test suites)
+- **Deviations:**
+  - Test count 30 vs spec estimate of 22 — more thorough coverage
+  - Added `--forceExit` flag needed due to node-cron background timers; mitigated with afterEach cleanup
