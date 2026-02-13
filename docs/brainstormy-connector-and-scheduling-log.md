@@ -89,3 +89,16 @@
 - **Deviations:**
   - Added snake_case→camelCase conversion in `getSelector()` so parent classes (AIAppConnector, GenericWebAppConnector) can still resolve selectors using their snake_case keys
   - Test count 39 vs spec estimate of 25 — more thorough coverage of new methods
+
+---
+
+## Step 7: Create scenario JSON files
+
+- **Files created:** `apps/brainstormy/scenarios/smoke-tests.json`, `apps/brainstormy/scenarios/memory-tests.json`, `apps/brainstormy/scenarios/bible-tests.json`
+- **Status:** done
+- **Changes:**
+  - smoke-tests.json: 5 scenarios (login, navigate, session+chat, search, navigation)
+  - memory-tests.json: 5 scenarios (single-session recall, cross-session, search recall, summary capture, bookmark context)
+  - bible-tests.json: 4 scenarios (generate standard, sections populated, outline report with citations, citation validity)
+  - Verification: All 3 files valid JSON, 14 total scenarios
+- **Deviations:** None — implemented verbatim from spec

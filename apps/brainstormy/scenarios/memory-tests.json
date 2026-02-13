@@ -1,0 +1,83 @@
+{
+  "name": "Brainstormy Memory Persistence Tests",
+  "mode": "full",
+  "agent": "sentinel",
+  "timeout_ms": 600000,
+  "scenarios": [
+    {
+      "id": "mem-01-single-session-recall",
+      "name": "Recall Fact Within Same Session",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Memory Test Story", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "The protagonist's name is Marcus and he is a blacksmith from the village of Thornfield." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "send_message", "params": { "text": "Marcus has a secret: he can see memories when he touches iron." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "validate_memory", "params": { "query": "What is the protagonist's name and occupation?", "expected": "Marcus" } },
+        { "assert": "field_true", "field": "found", "message": "Should recall Marcus as protagonist" }
+      ]
+    },
+    {
+      "id": "mem-02-cross-session-recall",
+      "name": "Recall Fact Across Sessions",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Cross-Session Memory Test", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "Our story is set in the year 2847 on a space station called Meridian." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "end_session", "params": {} },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "validate_memory", "params": { "query": "Where is our story set?", "expected": "Meridian" } },
+        { "assert": "field_true", "field": "found", "message": "Should recall Meridian across sessions" }
+      ]
+    },
+    {
+      "id": "mem-03-search-recall",
+      "name": "Semantic Search Finds Previous Content",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Search Recall Test", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "The antagonist uses a rare poison called Nightshade Extract that causes hallucinations before death." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "search", "params": { "query": "poison hallucinations" } },
+        { "assert": "result_count_gte", "field": "count", "value": 1, "message": "Search should find poison-related content" }
+      ]
+    },
+    {
+      "id": "mem-04-session-summary-captures-facts",
+      "name": "Session Summary Captures Key Decisions",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Summary Capture Test", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "We decided the climax happens at the abandoned lighthouse on chapter 15." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "send_message", "params": { "text": "The twist is that the lighthouse keeper is actually the protagonist's mother." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "end_session", "params": {} },
+        { "action": "get_session_summary", "params": {} },
+        { "assert": "field_contains", "field": "summary", "value": "lighthouse", "message": "Summary should mention the lighthouse" }
+      ]
+    },
+    {
+      "id": "mem-05-bookmark-in-context",
+      "name": "Bookmarked Content Appears in Context",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Bookmark Context Test", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "The magic system is powered by emotional resonance. Stronger emotions create stronger spells." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "create_bookmark", "params": { "message_index": 0, "title": "Magic System Rule" } },
+        { "action": "end_session", "params": {} },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "validate_memory", "params": { "query": "How does the magic system work?", "expected": "emotion" } },
+        { "assert": "field_true", "field": "found", "message": "Bookmarked magic system rule should be in context" }
+      ]
+    }
+  ]
+}

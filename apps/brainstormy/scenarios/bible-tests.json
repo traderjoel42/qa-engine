@@ -1,0 +1,61 @@
+{
+  "name": "Brainstormy Bible & Report Tests",
+  "mode": "full",
+  "agent": "librarian",
+  "timeout_ms": 900000,
+  "scenarios": [
+    {
+      "id": "bible-01-generate-standard",
+      "name": "Generate Standard Bible with Content",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Bible Test Story", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "Our protagonist is Elena, a 30-year-old marine biologist who discovers she can communicate with whales through dreams." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "send_message", "params": { "text": "The story is set in present-day Monterey Bay. The theme is about finding connection in isolation." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "end_session", "params": {} },
+        { "action": "generate_bible", "params": { "template": "standard" } },
+        { "assert": "field_gte", "field": "section_count", "value": 3, "message": "Bible should have at least 3 sections" }
+      ]
+    },
+    {
+      "id": "bible-02-sections-populated",
+      "name": "Bible Sections Contain Relevant Content",
+      "depends_on": "bible-01-generate-standard",
+      "steps": [
+        { "action": "get_bible", "params": { "template": "standard" } },
+        { "assert": "sections_have_content", "min_populated": 2, "message": "At least 2 sections should have content" }
+      ]
+    },
+    {
+      "id": "report-01-generate-outline",
+      "name": "Generate Outline Report with Citations",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Report Test Story", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "Act 1: Elena discovers her ability during a routine dive. She hears whale song in her dreams that night." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "send_message", "params": { "text": "Act 2: She travels to remote islands following the whales' directions, facing skepticism from her peers." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "send_message", "params": { "text": "Act 3: She realizes the whales are warning of an ecological disaster. She must convince the world." } },
+        { "action": "wait_for_response", "params": {} },
+        { "action": "end_session", "params": {} },
+        { "action": "generate_report", "params": { "type": "outline" } },
+        { "assert": "field_not_empty", "field": "content", "message": "Report should have content" },
+        { "assert": "has_citations", "field": "citations", "min_count": 1, "message": "Report should contain at least 1 citation" }
+      ]
+    },
+    {
+      "id": "report-02-citation-validity",
+      "name": "Report Citations Reference Real Messages",
+      "depends_on": "report-01-generate-outline",
+      "steps": [
+        { "action": "get_report", "params": {} },
+        { "assert": "citations_valid", "message": "All citation IDs should reference existing messages" }
+      ]
+    }
+  ]
+}

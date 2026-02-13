@@ -1,0 +1,55 @@
+{
+  "name": "Brainstormy Smoke Tests",
+  "mode": "smoke",
+  "agent": "healer",
+  "timeout_ms": 180000,
+  "scenarios": [
+    {
+      "id": "smoke-01-login",
+      "name": "Login and Dashboard Load",
+      "steps": [
+        { "action": "navigate", "params": { "path": "/" } },
+        { "assert": "selector_visible", "selector": "userMenu", "message": "User menu should be visible after login" }
+      ]
+    },
+    {
+      "id": "smoke-02-navigate-project",
+      "name": "Navigate to Existing Project",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "assert": "url_contains", "value": "/projects/", "message": "Should be on project page" }
+      ]
+    },
+    {
+      "id": "smoke-03-create-session-chat",
+      "name": "Create Session and Send Message",
+      "steps": [
+        { "action": "setup_test_project", "params": {} },
+        { "action": "create_story", "params": { "name": "Smoke Test Story", "vertical": "novel" } },
+        { "action": "create_session", "params": { "type": "explore" } },
+        { "action": "send_message", "params": { "text": "Hello, this is a smoke test message." } },
+        { "action": "wait_for_response", "params": {} },
+        { "assert": "element_count_gte", "selector": "aiMessage", "value": 1, "message": "Should have at least one AI response" }
+      ]
+    },
+    {
+      "id": "smoke-04-search",
+      "name": "Search Returns Results",
+      "depends_on": "smoke-03-create-session-chat",
+      "steps": [
+        { "action": "search", "params": { "query": "smoke test" } },
+        { "assert": "result_count_gte", "field": "count", "value": 0, "message": "Search should return without error" }
+      ]
+    },
+    {
+      "id": "smoke-05-navigation",
+      "name": "Navigate Between Views",
+      "steps": [
+        { "action": "navigate", "params": { "path": "/projects" } },
+        { "assert": "selector_visible", "selector": "sidebarProjects", "message": "Projects sidebar should be visible" },
+        { "action": "setup_test_project", "params": {} },
+        { "assert": "url_contains", "value": "/projects/", "message": "Should navigate to project" }
+      ]
+    }
+  ]
+}
