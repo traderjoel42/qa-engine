@@ -13,17 +13,12 @@ const {
  * - Generate story bibles with template selection
  * - Extract session summaries
  * - Extract citation data from AI responses
+ * - Clerk authentication via email/password
+ * - Test data management (setup project, archive data)
  *
- * Requires additional selectors in app config beyond AIAppConnector:
- *   new_project_button, project_name_input, create_project_submit
- *   new_story_button, story_name_input, story_vertical_select, create_story_submit
- *   new_session_button, session_type_select, create_session_submit
- *   story_bible_button, bible_template_prefix, generate_bible_button, bible_content
- *   session_summary_button, summary_content
- *   citation_element
- *
- * Requires url_patterns in app config:
- *   project_id, story_id, session_id (regex patterns for URL-based ID extraction)
+ * Selectors are resolved via getSelector() which checks:
+ *   1. connector.config.selectors in app.config.json (camelCase keys)
+ *   2. DEFAULT_SELECTORS from ./selectors.js (fallback)
  *
  * Inheritance chain:
  *   BaseConnector → GenericWebAppConnector → AIAppConnector → BrainstormyConnector (this)
@@ -41,6 +36,114 @@ const {
 class BrainstormyConnector extends AIAppConnector {
 
   // ===================================================================
+  // CONSTRUCTOR — State tracking for entity management
+  // ===================================================================
+
+  /**
+   * @param {Object} app - App configuration
+   * @param {import('playwright').Page} page - Playwright page instance
+   * @param {Object} evidenceCollector - Evidence collection service
+   */
+  constructor(app, page, evidenceCollector) {
+    super(app, page, evidenceCollector);
+
+    /** @type {string|null} */
+    this.currentProjectId = null;
+    /** @type {string|null} */
+    this.currentStoryId = null;
+    /** @type {string|null} */
+    this.currentSessionId = null;
+    /** @type {Array<{type: string, id: string, name: string}>} Created entity IDs for cleanup */
+    this.createdEntities = [];
+  }
+
+  // ===================================================================
+  // LIFECYCLE
+  // ===================================================================
+
+  /**
+   * Initialize: navigate to staging URL, authenticate via Clerk,
+   * verify dashboard loads.
+   */
+  async initialize() {
+    const env = this.getEnvironment();
+
+    // Navigate to app
+    await this.page.goto(env.baseUrl, { waitUntil: 'networkidle' });
+    await this.collectEvidence('initial_load');
+
+    // Authenticate
+    if (env.auth.required) {
+      const success = await this.authenticate();
+      if (!success) {
+        throw new ConnectorError(
+          'BrainstormyConnector: Authentication failed',
+          { phase: 'initialize' }
+        );
+      }
+    }
+
+    // Verify app ready
+    await this.waitForAppReady();
+    await this.collectEvidence('authenticated_ready');
+  }
+
+  /**
+   * Authenticate via Clerk's email/password sign-in form.
+   * @returns {Promise<boolean>} Success
+   */
+  async authenticate() {
+    const env = this.getEnvironment();
+    const auth = env.auth;
+    const timeout = this.getTimeout('clerkAuth');
+
+    try {
+      const emailSelector = this.getSelector('clerkEmailInput');
+      const passwordSelector = this.getSelector('clerkPasswordInput');
+      const submitSelector = this.getSelector('clerkSubmitButton');
+
+      await this.page.waitForSelector(emailSelector, { timeout });
+
+      // Fill credentials
+      await this.page.fill(emailSelector, auth.credentials.email);
+      await this.page.fill(
+        passwordSelector,
+        process.env[auth.credentials.passwordEnv]
+      );
+
+      // Submit
+      await this.page.click(submitSelector);
+
+      // Wait for redirect to dashboard
+      await this.page.waitForSelector(
+        this.getSelector('userMenu'),
+        { timeout }
+      );
+
+      await this.collectEvidence('auth_complete');
+      return true;
+    } catch (error) {
+      await this.collectEvidence('auth_failed');
+      console.error('Clerk authentication failed:', error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Cleanup: archive test data, logout, clear state.
+   */
+  async cleanup() {
+    try {
+      await this.archiveTestData();
+    } catch (error) {
+      console.warn('Cleanup archive failed:', error.message);
+    }
+
+    // Logout via parent chain
+    await super.cleanup();
+  }
+
+  // ===================================================================
   // ACTION DISPATCH — Overrides AIAppConnector
   // ===================================================================
 
@@ -48,7 +151,9 @@ class BrainstormyConnector extends AIAppConnector {
    * Evidence-wrapping dispatcher for Brainstormy-specific actions.
    *
    * Handles: create_project, create_story, create_session, navigate_to_story,
-   * generate_bible, get_session_summary.
+   * navigate_to_session, generate_bible, get_bible, generate_report, get_report,
+   * end_session, get_session_summary, search, create_bookmark, get_bookmarks,
+   * setup_test_project, archive_test_data.
    * Unrecognized actions delegate to super.performAction() which handles
    * AI actions and generic actions with their own evidence wrapping.
    *
@@ -59,7 +164,12 @@ class BrainstormyConnector extends AIAppConnector {
   async performAction(action, params = {}) {
     const brainstormyActions = [
       'create_project', 'create_story', 'create_session',
-      'navigate_to_story', 'generate_bible', 'get_session_summary'
+      'navigate_to_story', 'navigate_to_session',
+      'generate_bible', 'get_bible',
+      'generate_report', 'get_report',
+      'end_session', 'get_session_summary',
+      'search', 'create_bookmark', 'get_bookmarks',
+      'setup_test_project', 'archive_test_data'
     ];
 
     if (!brainstormyActions.includes(action)) {
@@ -73,6 +183,7 @@ class BrainstormyConnector extends AIAppConnector {
     let result;
     try {
       switch (action) {
+        // Entity creation
         case 'create_project':
           result = await this.createProject(params.name);
           break;
@@ -80,16 +191,60 @@ class BrainstormyConnector extends AIAppConnector {
           result = await this.createStory(params.name, params.vertical);
           break;
         case 'create_session':
-          result = await this.createSession(params.type);
+          result = await this.createSession(params.type, params.name);
           break;
+
+        // Navigation
         case 'navigate_to_story':
-          result = await this.navigateToStory(params.story_id);
+          result = await this.navigateToStory(params.story_id || params.name);
           break;
+        case 'navigate_to_session':
+          result = await this.navigateToSession(params.session_id || params.name);
+          break;
+
+        // Bible operations
         case 'generate_bible':
           result = await this.generateStoryBible(params.template);
           break;
+        case 'get_bible':
+          result = await this.getStoryBible(params.template);
+          break;
+
+        // Report operations
+        case 'generate_report':
+          result = await this.generateReport(params.type, params.parameters);
+          break;
+        case 'get_report':
+          result = await this.getReport(params.report_id);
+          break;
+
+        // Session lifecycle
+        case 'end_session':
+          result = await this.endSession();
+          break;
         case 'get_session_summary':
           result = await this.getSessionSummary(params.session_id);
+          break;
+
+        // Search
+        case 'search':
+          result = await this.performSearch(params.query);
+          break;
+
+        // Bookmarks
+        case 'create_bookmark':
+          result = await this.createBookmark(params.message_index, params.title);
+          break;
+        case 'get_bookmarks':
+          result = await this.getBookmarks(params.category);
+          break;
+
+        // Test data management
+        case 'setup_test_project':
+          result = await this.setupTestProject(params.name);
+          break;
+        case 'archive_test_data':
+          result = await this.archiveTestData();
           break;
       }
     } catch (error) {
@@ -117,13 +272,13 @@ class BrainstormyConnector extends AIAppConnector {
     await this.navigate('/projects');
 
     // Click new project button
-    await this.click(this.getSelector('new_project_button'));
+    await this.click(this.getSelector('newProjectButton'));
 
     // Fill project name
-    await this.type(this.getSelector('project_name_input'), name);
+    await this.type(this.getSelector('projectNameInput'), name);
 
     // Submit
-    await this.click(this.getSelector('create_project_submit'));
+    await this.click(this.getSelector('createProjectSubmit'));
 
     // Wait for redirect
     await this.waitForNavigation();
@@ -137,8 +292,10 @@ class BrainstormyConnector extends AIAppConnector {
       );
     }
 
-    // Store in state
+    // Store in state (both instance property and state map)
+    this.currentProjectId = projectId;
     this.setState('current_project_id', projectId);
+    this.createdEntities.push({ type: 'project', id: projectId, name });
 
     return {
       id: projectId,
@@ -155,8 +312,8 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {Promise<{id: string, name: string, vertical: string, timestamp: string}>}
    * @throws {ConnectorError} If no current project or story ID cannot be extracted
    */
-  async createStory(name, vertical) {
-    const projectId = this.getState('current_project_id');
+  async createStory(name, vertical = 'novel') {
+    const projectId = this.currentProjectId || this.getState('current_project_id');
     if (!projectId) {
       throw new ConnectorError(
         'No current project — call createProject first',
@@ -165,16 +322,19 @@ class BrainstormyConnector extends AIAppConnector {
     }
 
     // Click new story button
-    await this.click(this.getSelector('new_story_button'));
+    await this.click(this.getSelector('newStoryButton'));
 
     // Fill story name
-    await this.type(this.getSelector('story_name_input'), name);
+    await this.type(this.getSelector('storyNameInput'), name);
 
     // Select vertical
-    await this.select(this.getSelector('story_vertical_select'), vertical);
+    const verticalSelector = this.getSelector('storyVerticalSelect');
+    if (verticalSelector && await this.exists(verticalSelector)) {
+      await this.select(verticalSelector, vertical);
+    }
 
     // Submit
-    await this.click(this.getSelector('create_story_submit'));
+    await this.click(this.getSelector('createStorySubmit'));
 
     // Wait for redirect
     await this.waitForNavigation();
@@ -189,7 +349,9 @@ class BrainstormyConnector extends AIAppConnector {
     }
 
     // Store in state
+    this.currentStoryId = storyId;
     this.setState('current_story_id', storyId);
+    this.createdEntities.push({ type: 'story', id: storyId, name });
 
     return {
       id: storyId,
@@ -202,12 +364,13 @@ class BrainstormyConnector extends AIAppConnector {
   /**
    * Create a new session within the current story.
    *
-   * @param {string} [type] - Session type (e.g., 'explore', 'develop', 'guide')
-   * @returns {Promise<{id: string, type: string|undefined, timestamp: string}>}
+   * @param {string} [type='explore'] - Session type
+   * @param {string} [name] - Optional session name
+   * @returns {Promise<{id: string, type: string, name: string, timestamp: string}>}
    * @throws {ConnectorError} If no current story or session ID cannot be extracted
    */
-  async createSession(type) {
-    const storyId = this.getState('current_story_id');
+  async createSession(type = 'explore', name) {
+    const storyId = this.currentStoryId || this.getState('current_story_id');
     if (!storyId) {
       throw new ConnectorError(
         'No current story — call createStory first',
@@ -216,18 +379,18 @@ class BrainstormyConnector extends AIAppConnector {
     }
 
     // Click new session button
-    await this.click(this.getSelector('new_session_button'));
+    await this.click(this.getSelector('newSessionButton'));
 
     // Select session type if provided and selector exists
     if (type) {
-      const typeSelector = this.getSelector('session_type_select');
-      if (typeSelector) {
+      const typeSelector = this.getSelector('sessionTypeSelect');
+      if (typeSelector && await this.exists(typeSelector)) {
         await this.select(typeSelector, type);
       }
     }
 
     // Submit (if there's a separate submit button)
-    const submitSelector = this.getSelector('create_session_submit');
+    const submitSelector = this.getSelector('createSessionSubmit');
     if (submitSelector && await this.exists(submitSelector)) {
       await this.click(submitSelector);
     }
@@ -245,24 +408,96 @@ class BrainstormyConnector extends AIAppConnector {
     }
 
     // Store in state
+    const sessionName = name || `QA Session ${Date.now()}`;
+    this.currentSessionId = sessionId;
     this.setState('current_session_id', sessionId);
+    this.createdEntities.push({ type: 'session', id: sessionId, name: sessionName });
 
     return {
       id: sessionId,
       type,
+      name: sessionName,
       timestamp: new Date().toISOString()
     };
   }
 
   /**
-   * Navigate to a specific story.
-   *
-   * @param {string} storyId - Story UUID
-   * @returns {Promise<void>}
+   * End the current session, triggering summary generation.
+   * @returns {Promise<{session_id: string, summary_generated: boolean}>}
    */
-  async navigateToStory(storyId) {
-    await this.navigate(`/stories/${storyId}`);
-    this.setState('current_story_id', storyId);
+  async endSession() {
+    const endButton = this.getSelector('endSessionButton');
+    if (!await this.exists(endButton)) {
+      throw new ConnectorError(
+        'End session button not found — is a session active?',
+        { action: 'end_session', phase: 'interact' }
+      );
+    }
+
+    await this.click(endButton);
+
+    // Wait for summary generation (may take time)
+    const timeout = this.getTimeout('sessionSummary');
+    try {
+      await this.waitFor(
+        this.getSelector('sessionSummaryContent'),
+        timeout
+      );
+      return { session_id: this.currentSessionId, summary_generated: true };
+    } catch {
+      return { session_id: this.currentSessionId, summary_generated: false };
+    }
+  }
+
+  /**
+   * Navigate to a specific story by name or ID.
+   * @param {string} storyIdentifier - Story name, UUID, or storyId
+   */
+  async navigateToStory(storyIdentifier) {
+    // If it looks like a UUID, navigate directly
+    if (/^[a-f0-9-]{36}$/.test(storyIdentifier)) {
+      await this.navigate(`/stories/${storyIdentifier}`);
+      this.currentStoryId = storyIdentifier;
+      this.setState('current_story_id', storyIdentifier);
+      return;
+    }
+
+    // Otherwise, search sidebar items
+    const storyItems = await this.page.$$(this.getSelector('storySidebarItem'));
+    for (const item of storyItems) {
+      const text = await item.textContent();
+      const href = await item.getAttribute('href');
+      if (text.includes(storyIdentifier) || (href && href.includes(storyIdentifier))) {
+        await item.click();
+        await this.waitForNavigation();
+        return;
+      }
+    }
+    throw new ConnectorError(
+      `Story "${storyIdentifier}" not found in sidebar`,
+      { action: 'navigate_to_story', phase: 'interact' }
+    );
+  }
+
+  /**
+   * Navigate to a specific session by name or ID.
+   * @param {string} sessionIdentifier - Session name or UUID
+   */
+  async navigateToSession(sessionIdentifier) {
+    const sessionItems = await this.page.$$(this.getSelector('sessionItem'));
+    for (const item of sessionItems) {
+      const text = await item.textContent();
+      const href = await item.getAttribute('href');
+      if (text.includes(sessionIdentifier) || (href && href.includes(sessionIdentifier))) {
+        await item.click();
+        await this.waitForNavigation();
+        return;
+      }
+    }
+    throw new ConnectorError(
+      `Session "${sessionIdentifier}" not found`,
+      { action: 'navigate_to_session', phase: 'interact' }
+    );
   }
 
   // ===================================================================
@@ -273,11 +508,11 @@ class BrainstormyConnector extends AIAppConnector {
    * Generate a story bible using the specified template.
    *
    * @param {string} [template='standard'] - Template key
-   * @returns {Promise<{template: string, content: string, timestamp: string}>}
+   * @returns {Promise<{template: string, sections: Object, section_count: number, timestamp: string}>}
    * @throws {ConnectorError} If no current story
    */
   async generateStoryBible(template = 'standard') {
-    const storyId = this.getState('current_story_id');
+    const storyId = this.currentStoryId || this.getState('current_story_id');
     if (!storyId) {
       throw new ConnectorError(
         'No current story — call createStory or navigateToStory first',
@@ -286,29 +521,247 @@ class BrainstormyConnector extends AIAppConnector {
     }
 
     // Navigate to bible section
-    await this.click(this.getSelector('story_bible_button'));
+    await this.click(this.getSelector('bibleTab'));
 
-    // Select template (prefix + template key)
-    const templatePrefix = this.getSelector('bible_template_prefix');
-    if (templatePrefix) {
-      await this.click(`${templatePrefix}${template}"]`);
+    // Select template
+    const templateSelector = this.getSelector('bibleTemplateSelect');
+    if (templateSelector && await this.exists(templateSelector)) {
+      await this.select(templateSelector, template);
     }
 
     // Click generate
-    await this.click(this.getSelector('generate_bible_button'));
+    await this.click(this.getSelector('bibleGenerateButton'));
 
-    // Wait for generation (can take a while)
-    const bibleTimeout = this.getTimeout('bible_generation', 120000);
-    await this.waitFor(this.getSelector('bible_content'), bibleTimeout);
+    // Wait for generation (can take 30-120s)
+    const bibleTimeout = this.getTimeout('bibleGeneration');
+    const generatingIndicator = this.getSelector('bibleGeneratingIndicator');
 
-    // Extract bible content
-    const bibleData = await this.extractData(this.getSelector('bible_content'));
+    // Wait for indicator to appear then disappear
+    try {
+      await this.page.waitForSelector(generatingIndicator, { timeout: 10000 });
+    } catch {
+      // Indicator may not appear if generation is instant
+    }
+
+    // Wait for indicator to disappear (generation complete)
+    await this.page.waitForSelector(generatingIndicator, {
+      state: 'hidden',
+      timeout: bibleTimeout
+    });
+
+    // Extract sections
+    const sections = await this.extractBibleSections();
 
     return {
       template,
-      content: bibleData ? bibleData.text : '',
+      sections,
+      section_count: Object.keys(sections).length,
       timestamp: new Date().toISOString()
     };
+  }
+
+  /**
+   * Get the current Story Bible content.
+   * @param {string} [template='standard']
+   * @returns {Promise<{template: string, sections: Object}>}
+   */
+  async getStoryBible(template = 'standard') {
+    await this.click(this.getSelector('bibleTab'));
+    await this.waitFor(this.getSelector('bibleSection'));
+
+    const sections = await this.extractBibleSections();
+    return { template, sections };
+  }
+
+  /**
+   * Extract all bible section titles and content from the page.
+   * @private
+   * @returns {Promise<Object>} Map of section_key → { title, content, has_content }
+   */
+  async extractBibleSections() {
+    const sectionSelector = this.getSelector('bibleSection');
+    const sectionElements = await this.page.$$(sectionSelector);
+
+    const sections = {};
+    for (const el of sectionElements) {
+      const title = await el.$eval(
+        '.section-title, h3, [data-testid="section-title"]',
+        (node) => node.textContent.trim()
+      ).catch(() => 'Unknown');
+
+      const content = await el.$eval(
+        '.section-content, [data-testid="section-content"]',
+        (node) => node.textContent.trim()
+      ).catch(() => '');
+
+      const key = title.toLowerCase().replace(/\s+/g, '_');
+      sections[key] = {
+        title,
+        content,
+        has_content: content.length > 0
+      };
+    }
+
+    return sections;
+  }
+
+  // ===================================================================
+  // REPORT OPERATIONS
+  // ===================================================================
+
+  /**
+   * Generate a report for the current story.
+   * @param {string} type - Report type ('outline', 'character_profile', etc.)
+   * @param {Object} [parameters={}] - Report parameters
+   * @returns {Promise<{type: string, content: string, citations: Object}>}
+   */
+  async generateReport(type, parameters = {}) {
+    await this.click(this.getSelector('reportTab'));
+    await this.waitFor(this.getSelector('reportTypeSelect'));
+
+    await this.select(this.getSelector('reportTypeSelect'), type);
+
+    // Fill parameters if any (e.g., character name input)
+    for (const [key, value] of Object.entries(parameters)) {
+      const paramSelector = `[data-testid="report-param-${key}"]`;
+      if (await this.exists(paramSelector)) {
+        await this.type(paramSelector, value);
+      }
+    }
+
+    await this.click(this.getSelector('reportGenerateButton'));
+
+    // Wait for report generation
+    const timeout = this.getTimeout('reportGeneration');
+    await this.waitFor(this.getSelector('reportContent'), timeout);
+
+    // Extract content and citations
+    const contentData = await this.extractData(this.getSelector('reportContent'));
+    const citations = await this.extractCitations();
+
+    return { type, content: contentData ? contentData.text : '', citations };
+  }
+
+  /**
+   * Get the current report content.
+   * @param {string} [reportId] - Optional report ID
+   * @returns {Promise<{content: string, citations: Object}>}
+   */
+  async getReport(reportId) {
+    const contentData = await this.extractData(this.getSelector('reportContent'));
+    const citations = await this.extractCitations();
+    return { content: contentData ? contentData.text : '', citations };
+  }
+
+  // ===================================================================
+  // SEARCH OPERATIONS
+  // ===================================================================
+
+  /**
+   * Perform a semantic search in the current story.
+   * @param {string} query - Search query
+   * @returns {Promise<{query: string, results: Array, count: number}>}
+   */
+  async performSearch(query) {
+    const searchInput = this.getSelector('searchInput');
+    await this.waitFor(searchInput);
+    await this.type(searchInput, query);
+
+    const searchSubmit = this.getSelector('searchSubmit');
+    if (searchSubmit && await this.exists(searchSubmit)) {
+      await this.click(searchSubmit);
+    } else {
+      await this.page.press(searchInput, 'Enter');
+    }
+
+    // Wait for results
+    const timeout = this.getTimeout('search');
+    await this.waitFor(this.getSelector('searchResults'), timeout);
+
+    // Extract results
+    const resultSelector = this.getSelector('searchResultItem');
+    const resultElements = await this.page.$$(resultSelector);
+
+    const results = [];
+    for (const el of resultElements) {
+      const text = await el.textContent();
+      const source = await el.getAttribute('data-source-type').catch(() => 'message');
+      results.push({ text: text.trim(), source });
+    }
+
+    return { query, results, count: results.length };
+  }
+
+  // ===================================================================
+  // BOOKMARK OPERATIONS
+  // ===================================================================
+
+  /**
+   * Bookmark a message in the current session.
+   * @param {number} [messageIndex=0] - 0-based index of message to bookmark (from most recent)
+   * @param {string} [title='QA Test Bookmark'] - Bookmark title
+   * @returns {Promise<{bookmarked: boolean, title: string}>}
+   */
+  async createBookmark(messageIndex = 0, title = 'QA Test Bookmark') {
+    const messages = await this.page.$$(this.getSelector('aiMessage'));
+    if (messages.length === 0) {
+      throw new ConnectorError(
+        'No messages to bookmark',
+        { action: 'create_bookmark', phase: 'interact' }
+      );
+    }
+
+    const targetIndex = Math.min(messageIndex, messages.length - 1);
+    const targetMessage = messages[messages.length - 1 - targetIndex];
+
+    // Hover to reveal bookmark button
+    await targetMessage.hover();
+    const bookmarkBtn = await targetMessage.$(this.getSelector('bookmarkButton'));
+    if (!bookmarkBtn) {
+      throw new ConnectorError(
+        'Bookmark button not found on message',
+        { action: 'create_bookmark', phase: 'interact' }
+      );
+    }
+
+    await bookmarkBtn.click();
+
+    // Fill title
+    await this.waitFor(this.getSelector('bookmarkTitleInput'));
+    await this.type(this.getSelector('bookmarkTitleInput'), title);
+    await this.click(this.getSelector('bookmarkSaveButton'));
+
+    // Wait for confirmation
+    await this.page.waitForTimeout(1000);
+
+    return { bookmarked: true, title };
+  }
+
+  /**
+   * Get all bookmarks for the current story.
+   * @param {string} [category] - Optional category filter
+   * @returns {Promise<{bookmarks: Array, count: number}>}
+   */
+  async getBookmarks(category) {
+    await this.click(this.getSelector('bookmarksTab'));
+    await this.waitFor(this.getSelector('bookmarkItem'));
+
+    const bookmarkElements = await this.page.$$(this.getSelector('bookmarkItem'));
+
+    const bookmarks = [];
+    for (const el of bookmarkElements) {
+      const elTitle = await el.$eval(
+        '[data-testid="bookmark-title"], .bookmark-title',
+        (node) => node.textContent.trim()
+      ).catch(() => '');
+      const content = await el.$eval(
+        '[data-testid="bookmark-content"], .bookmark-content',
+        (node) => node.textContent.trim()
+      ).catch(() => '');
+      bookmarks.push({ title: elTitle, content });
+    }
+
+    return { bookmarks, count: bookmarks.length };
   }
 
   // ===================================================================
@@ -316,33 +769,85 @@ class BrainstormyConnector extends AIAppConnector {
   // ===================================================================
 
   /**
-   * Get a session summary.
-   *
-   * @param {string} sessionId - Session UUID
-   * @returns {Promise<{session_id: string, summary: string, timestamp: string}>}
+   * Get session summary content.
+   * @param {string} [sessionId] - Session ID (defaults to current)
+   * @returns {Promise<{session_id: string, summary: string|null, timestamp: string}>}
    */
   async getSessionSummary(sessionId) {
-    // Navigate to session
-    await this.navigate(`/sessions/${sessionId}`);
+    const sid = sessionId || this.currentSessionId || this.getState('current_session_id');
 
-    // Click summary button
-    await this.click(this.getSelector('session_summary_button'));
+    // Click summary button if it exists (existing connector pattern)
+    const summaryButton = this.getSelector('sessionSummaryButton');
+    if (summaryButton && await this.exists(summaryButton)) {
+      await this.click(summaryButton);
+      await this.waitFor(this.getSelector('sessionSummaryContent'));
+    }
 
-    // Wait for summary content to appear
-    await this.waitFor(this.getSelector('summary_content'));
+    // Extract summary content
+    const summarySelector = this.getSelector('sessionSummaryContent');
+    if (await this.exists(summarySelector)) {
+      const summaryData = await this.extractData(summarySelector);
+      return {
+        session_id: sid,
+        summary: summaryData ? summaryData.text : null,
+        timestamp: new Date().toISOString()
+      };
+    }
 
-    // Extract summary text
-    const summaryData = await this.extractData(this.getSelector('summary_content'));
-
-    return {
-      session_id: sessionId,
-      summary: summaryData ? summaryData.text : '',
-      timestamp: new Date().toISOString()
-    };
+    return { session_id: sid, summary: null, timestamp: new Date().toISOString() };
   }
 
   // ===================================================================
-  // CITATION EXTRACTION (waitForAIResponse override)
+  // TEST DATA MANAGEMENT
+  // ===================================================================
+
+  /**
+   * Set up a dedicated test project for QA runs.
+   * Creates the project if it doesn't exist, or navigates to it.
+   * @param {string} [name='QA Test Project']
+   * @returns {Promise<{project_id: string, created: boolean}>}
+   */
+  async setupTestProject(name = 'QA Test Project') {
+    await this.navigate('/projects');
+    await this.waitFor(this.getSelector('sidebarProjects'));
+
+    // Check if test project already exists
+    const projectLinks = await this.page.$$('a[href*="/projects/"]');
+    for (const link of projectLinks) {
+      const text = await link.textContent();
+      if (text.trim() === name) {
+        await link.click();
+        await this.waitForNavigation();
+
+        const projectId = await this._extractIdFromUrl('project_id');
+        this.currentProjectId = projectId;
+        this.setState('current_project_id', projectId);
+
+        return { project_id: projectId, created: false };
+      }
+    }
+
+    // Create new test project
+    const project = await this.createProject(name);
+    return { project_id: project.id, created: true };
+  }
+
+  /**
+   * Archive test stories by logging created entities for post-mortem.
+   * @private
+   */
+  async archiveTestData() {
+    // Best-effort cleanup — log entities created during this run
+    if (this.createdEntities.length > 0) {
+      console.log(
+        'BrainstormyConnector: Created entities for cleanup:',
+        JSON.stringify(this.createdEntities, null, 2)
+      );
+    }
+  }
+
+  // ===================================================================
+  // CITATION EXTRACTION (waitForAIResponse override) — KEPT from existing
   // ===================================================================
 
   /**
@@ -373,7 +878,7 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {Promise<Array<{id: string, text: string}>>}
    */
   async extractCitations() {
-    const citationSelector = this.getSelector('citation_element');
+    const citationSelector = this.getSelector('reportCitation');
     if (!citationSelector) {
       return [];
     }
@@ -394,7 +899,97 @@ class BrainstormyConnector extends AIAppConnector {
   }
 
   // ===================================================================
-  // HELPERS
+  // SELECTOR / TIMEOUT / ENVIRONMENT OVERRIDES
+  // ===================================================================
+
+  /**
+   * Override getSelector() to resolve from connector.config.selectors path.
+   *
+   * BaseConnector.getSelector() reads this.app.config?.selectors?.[key], but our
+   * config puts selectors at this.app.connector.config.selectors. This override
+   * checks the correct path first, then falls back to DEFAULT_SELECTORS.
+   *
+   * @param {string} key - Selector key in camelCase (e.g., 'chatInput')
+   * @returns {string} CSS selector string
+   */
+  getSelector(key) {
+    // 1. Config selectors (highest priority — overridable per-deployment)
+    const configSelector = this.app.connector?.config?.selectors?.[key];
+    if (configSelector) return configSelector;
+
+    // 2. Default selectors from selectors.js (fallback)
+    const DEFAULT_SELECTORS = require('./selectors');
+    return DEFAULT_SELECTORS[key] || null;
+  }
+
+  /**
+   * Get a timeout value from config.
+   * Config uses camelCase keys (e.g., aiResponse, bibleGeneration).
+   * @param {string} key - Timeout key in camelCase
+   * @returns {number} Timeout in ms
+   */
+  getTimeout(key) {
+    const defaults = {
+      aiResponse: 60000,
+      bibleGeneration: 120000,
+      reportGeneration: 90000,
+      navigation: 30000,
+      search: 15000,
+      sessionSummary: 60000,
+      clerkAuth: 30000
+    };
+    return this.app.connector?.config?.timeouts?.[key] || defaults[key];
+  }
+
+  /**
+   * Override waitForAppReady() from GenericWebAppConnector.
+   *
+   * The base class reads this.app.config?.ready_indicator, but our config
+   * stores the ready indicator as a selector key in connector.config.selectors.
+   * This override resolves it via getSelector().
+   */
+  async waitForAppReady() {
+    const readySelector = this.getSelector('readyIndicator');
+    if (readySelector) {
+      await this.waitFor(readySelector, this.getTimeout('navigation'));
+    }
+  }
+
+  /**
+   * Get the current environment config.
+   * Reads from flat top-level config by default (baseUrl, connector.config.auth).
+   * Merges environment overrides when specified.
+   * @param {string} [envName] - Optional environment name override
+   * @returns {{ baseUrl: string, auth: Object }}
+   */
+  getEnvironment(envName) {
+    const auth = this.app.connector?.config?.auth || {};
+    const baseConfig = {
+      baseUrl: this.app.baseUrl,
+      auth
+    };
+
+    // If an environment override exists, merge it
+    if (envName && this.app.environments?.[envName]) {
+      const envOverride = this.app.environments[envName];
+      return {
+        baseUrl: envOverride.baseUrl || baseConfig.baseUrl,
+        auth: {
+          ...baseConfig.auth,
+          ...envOverride.auth,
+          credentials: {
+            ...baseConfig.auth?.credentials,
+            ...envOverride.auth?.credentials
+          }
+        }
+      };
+    }
+
+    return baseConfig;
+  }
+
+  // ===================================================================
+  // HELPERS — KEPT from existing
   // ===================================================================
 
   /**
@@ -404,7 +999,8 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {Promise<string|null>} Extracted ID or null if not matched
    */
   async _extractIdFromUrl(patternKey) {
-    const pattern = this.app.config?.url_patterns?.[patternKey];
+    const pattern = this.app.config?.url_patterns?.[patternKey]
+      || this.app.connector?.config?.url_patterns?.[patternKey];
     if (!pattern) {
       // Fallback: try generic UUID pattern
       const url = await this.getCurrentURL();
