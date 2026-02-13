@@ -1,9 +1,9 @@
 # QA Engine: Day 5 Implementation Spec — Engine Factory, Configuration & Minimal CLI
 
-**Version:** 1.0  
+**Version:** 1.1 (post-feasibility review)  
 **Date:** February 12, 2026  
 **Depends on:** All Week 1–4 implementations (~1536 passing tests)  
-**Target:** ~70 new tests → Running total ~1606 tests
+**Target:** ~72 new tests → Running total ~1608 tests
 
 ---
 
@@ -64,9 +64,15 @@ Day 5 is the **integration wiring layer** — the glue that assembles all standa
 
 ### 1.6 FailureHandler Bridge Pattern
 
-**Decision:** The factory creates a thin `FailureHandler` object that wraps `BugDetector` and iterates over failed scenarios from a test result, calling `bugDetector.detectAndReport()` for each.
+**Decision:** The factory creates a thin `FailureHandler` object that wraps `BugDetector` and iterates over failed results from an `OrchestratorResult`, calling `bugDetector.detectAndReport()` for each.
 
-**Rationale:** The TestOrchestrator expects a `failureHandler` with a `.handle(result)` method that processes an entire result object. The BugDetector expects individual failures via `.detectAndReport()`. The bridge adapts between these two interfaces without modifying either existing class. This keeps the Orchestrator and BugDetector decoupled — neither knows about the other's API.
+**Rationale:** The TestOrchestrator expects a `failureHandler` with a `.handle(result)` method that receives an `OrchestratorResult` object. The `OrchestratorResult` contains `agentResults[]`, each with an `agentId` (string) and `results[]` array. The BugDetector expects individual failures via `.detectAndReport(app, agentId, failure)` where `agentId` is a string. The bridge adapts between these two interfaces without modifying either existing class.
+
+### 1.7 Agent Registration at Run Time
+
+**Decision:** Agent classes are registered with the TestOrchestrator inside `engine.run()`, just before calling `orchestrator.run()`. A default registry maps agent IDs to their classes (`healer` → `HealerAgent`, etc.). The registry is overridable via `createEngine({ agentRegistry })`.
+
+**Rationale:** The TestOrchestrator requires agents to be registered via `registerAgent(agentId, AgentClass)` before `run()` will work. Registering at run time (not at factory creation time) means only the requested agents are loaded, and the registry can be swapped for testing without modifying global state. The default registry covers the three built-in agents; Phase 3 custom agents would extend this registry.
 
 ---
 
@@ -93,7 +99,7 @@ tests/
     config.test.js             # ~12 tests
     app-loader.test.js         # ~10 tests
   engine/
-    factory.test.js            # ~22 tests
+    factory.test.js            # ~24 tests
   cli/
     test-command.test.js       # ~10 tests
     status-command.test.js     # ~8 tests
@@ -202,7 +208,7 @@ const engine = {
    * Run tests for an app.
    * @param {string} appId - App identifier (matches directory in apps/)
    * @param {object} options - { agents: ['healer'], mode: 'smoke' }
-   * @returns {object} Test run summary
+   * @returns {Promise<object>} Test run summary (OrchestratorResult)
    */
   async run(appId, options = {}) { /* ... */ },
   
@@ -486,6 +492,22 @@ const BugDetector = require('./bug-detector');
 const AutoFixer = require('./auto-fixer');
 const ApprovalManager = require('./approval-manager');
 
+// Agent classes (for registration with orchestrator)
+const HealerAgent = require('../../agents/healer/agent');
+const SentinelAgent = require('../../agents/sentinel/agent');
+const LibrarianAgent = require('../../agents/librarian/agent');
+
+/**
+ * Default agent registry — maps agent IDs to their classes.
+ * The factory uses this to register agents with the orchestrator
+ * before running tests. Can be overridden via createEngine({ agentRegistry }).
+ */
+const defaultAgentRegistry = {
+  healer: HealerAgent,
+  sentinel: SentinelAgent,
+  librarian: LibrarianAgent
+};
+
 // Concrete adapters
 const { AnthropicAdapter } = require('../integrations/anthropic');
 const { TwilioWhatsAppAdapter } = require('../integrations/twilio');
@@ -497,7 +519,7 @@ const NotificationAdapter = require('../integrations/adapters/notification');
 const BugTrackerAdapter = require('../integrations/adapters/bug-tracker');
 
 // Connector factory
-const ConnectorFactory = require('../../../connectors/connector-factory');
+const ConnectorFactory = require('../../connectors/factory');
 
 /**
  * Console notification adapter — fallback when Twilio isn't configured.
@@ -509,11 +531,11 @@ class ConsoleNotificationAdapter extends NotificationAdapter {
     this.sent = []; // Track for testing
   }
   
-  async send(recipients, message) {
+  async send(recipient, message) {
     const timestamp = new Date().toISOString();
-    console.log(`[NOTIFICATION ${timestamp}] To: ${recipients.join(', ')}`);
+    console.log(`[NOTIFICATION ${timestamp}] To: ${recipient}`);
     console.log(`  ${message}`);
-    this.sent.push({ recipients, message, timestamp });
+    this.sent.push({ recipient, message, timestamp });
     return { success: true, adapter: 'console' };
   }
 }
@@ -523,7 +545,7 @@ class ConsoleNotificationAdapter extends NotificationAdapter {
  * Uses pattern matching instead of LLM for bug classification.
  */
 class RuleBasedLLMAdapter extends LLMAdapter {
-  async analyze(prompt) {
+  async complete(prompt, options = {}) {
     // Return a structured analysis based on keyword patterns
     const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
     
@@ -582,34 +604,48 @@ class NullBugTrackerAdapter extends BugTrackerAdapter {
  * FailureHandler bridge — adapts BugDetector's per-failure API to the 
  * TestOrchestrator's per-result API.
  * 
- * The Orchestrator calls failureHandler.handle(result) with a full test result.
- * This bridge iterates failed scenarios and calls BugDetector.detectAndReport() for each.
+ * The Orchestrator calls failureHandler.handle(result) where result is an
+ * OrchestratorResult containing agentResults[]. Each agentResult has an agentId
+ * and a results[] array. Failed results have status === 'failed' with error info.
+ * 
+ * This bridge iterates failed results and calls BugDetector.detectAndReport()
+ * for each, passing the agentId as a string (not an object).
  */
 class FailureHandler {
-  constructor({ bugDetector, appLoader, appsDir }) {
+  constructor({ bugDetector }) {
     this.bugDetector = bugDetector;
-    this.appLoader = appLoader;
-    this.appsDir = appsDir;
   }
   
   async handle(result) {
-    if (!result || !result.failures || result.failures.length === 0) {
+    if (!result) {
       return [];
     }
     
     const bugs = [];
     
-    for (const failure of result.failures) {
-      try {
-        const bug = await this.bugDetector.detectAndReport(
-          result.app || {},
-          result.agent || {},
-          failure
-        );
-        bugs.push(bug);
-      } catch (err) {
-        console.error(`FailureHandler: Error processing failure: ${err.message}`);
-        // Continue processing other failures
+    // OrchestratorResult shape: { app, agentResults: [{ agentId, results: [...] }] }
+    // Extract the app config and iterate each agent's failed results.
+    const app = result.app || {};
+    const agentResults = result.agentResults || [];
+    
+    for (const agentResult of agentResults) {
+      const agentId = agentResult.agentId || 'unknown';
+      const failures = (agentResult.results || []).filter(
+        r => r.status === 'failed'
+      );
+      
+      for (const failure of failures) {
+        try {
+          const bug = await this.bugDetector.detectAndReport(
+            app,
+            agentId,   // string, not object
+            failure
+          );
+          bugs.push(bug);
+        } catch (err) {
+          console.error(`FailureHandler: Error processing failure for agent "${agentId}": ${err.message}`);
+          // Continue processing other failures
+        }
       }
     }
     
@@ -629,9 +665,10 @@ class FailureHandler {
  *   @param {object} overrides.connectorFactory - Connector factory override
  *   @param {object} overrides.stateManager - State manager override
  *   @param {function} overrides.appLoader - App loader function override
- * @returns {object} Engine object with run(), status(), bugs(), shutdown()
+ *   @param {object} overrides.agentRegistry - Map of agentId → AgentClass (overrides default registry)
+ * @returns {Promise<object>} Engine object with run(), status(), bugs(), shutdown()
  */
-function createEngine(overrides = {}) {
+async function createEngine(overrides = {}) {
   // 1. Configuration
   const config = overrides.config || loadConfig();
   const validation = validateConfig(config);
@@ -644,7 +681,7 @@ function createEngine(overrides = {}) {
   }
   
   // 2. Database
-  const db = overrides.db || createDatabase({
+  const db = overrides.db || await createDatabase({
     dbPath: config.db.inMemory ? ':memory:' : config.db.path
   });
   
@@ -682,8 +719,9 @@ function createEngine(overrides = {}) {
       : new NullBugTrackerAdapter()
   );
   
-  // 5. Connector factory
-  const connectorFactory = overrides.connectorFactory || new ConnectorFactory();
+  // 5. Connector factory (pass the class itself — it uses static methods;
+  //    TestOrchestrator stores it as this._connectorFactory = ConnectorFactory)
+  const connectorFactory = overrides.connectorFactory || ConnectorFactory;
   
   // 6. Core engine components
   const approvalManager = new ApprovalManager({
@@ -714,9 +752,7 @@ function createEngine(overrides = {}) {
   
   // 8. Failure handler bridge
   const failureHandler = new FailureHandler({
-    bugDetector,
-    appLoader: appLoaderFn,
-    appsDir
+    bugDetector
   });
   
   // 9. Test orchestrator
@@ -733,15 +769,25 @@ function createEngine(overrides = {}) {
       const appConfig = appLoaderFn(appsDir, appId);
       
       // Filter agents if specified
-      const agentFilter = options.agents
+      const agentIds = options.agents
         ? options.agents
         : Object.keys(appConfig.agents || {}).filter(
             a => appConfig.agents[a].enabled !== false
           );
       
-      const result = await orchestrator.runTests(appConfig, {
+      // Register agents with the orchestrator before running.
+      // Agent classes are resolved by ID from the known agent registry.
+      // Re-registering is idempotent — the orchestrator overwrites existing entries.
+      const agentRegistry = overrides.agentRegistry || defaultAgentRegistry;
+      for (const agentId of agentIds) {
+        if (agentRegistry[agentId]) {
+          orchestrator.registerAgent(agentId, agentRegistry[agentId]);
+        }
+      }
+      
+      const result = await orchestrator.run(appConfig, {
         ...options,
-        agents: agentFilter
+        agentIds
       });
       
       return result;
@@ -749,23 +795,22 @@ function createEngine(overrides = {}) {
     
     async status(options = {}) {
       const limit = options.limit || 10;
-      const runs = db.testRuns.findAll({
-        orderBy: 'created_at DESC',
-        limit
-      });
+      const runs = db.testRuns.findMany(
+        {},
+        { orderBy: { started_at: 'DESC' }, limit }
+      );
       return runs;
     },
     
     async bugs(appId, options = {}) {
-      const query = { app_id: appId };
+      const where = { app_id: appId };
       if (options.status) {
-        query.status = options.status;
+        where.status = options.status;
       }
-      const bugs = db.bugs.findAll({
-        where: query,
-        orderBy: 'created_at DESC',
-        limit: options.limit || 20
-      });
+      const bugs = db.bugs.findMany(
+        where,
+        { orderBy: { created_at: 'DESC' }, limit: options.limit || 20 }
+      );
       return bugs;
     },
     
@@ -816,15 +861,7 @@ module.exports = {
 Add to existing errors file:
 
 ```javascript
-// Add these to the existing errors.js exports
-
-class ConfigError extends EngineError {
-  constructor(message, field = null) {
-    super(message);
-    this.name = 'ConfigError';
-    this.field = field;
-  }
-}
+// Add to the existing errors.js exports
 
 class AppLoaderError extends EngineError {
   constructor(message, appId = null) {
@@ -834,10 +871,10 @@ class AppLoaderError extends EngineError {
   }
 }
 
-// Add to module.exports: ConfigError, AppLoaderError
+// Add to module.exports: AppLoaderError
 ```
 
-**Note:** The `AppLoaderError` in `core/app-loader.js` is a standalone class (extends `Error`). If the engine errors module is the preferred pattern, the app-loader can import and use the centralized version instead. Either approach works — the key constraint is that `app-loader.js` should not depend on heavy engine internals to stay lightweight for CLI usage.
+**Note:** `ConfigError` lives in `core/config.js` as a standalone class (extends `Error`, not `EngineError`). This keeps `config.js` dependency-free — it can be used by the CLI entry point without pulling in the engine error hierarchy. `AppLoaderError` is defined both standalone in `core/app-loader.js` and as an `EngineError` subclass here; the standalone version is used by the app-loader module, while the engine version is available for engine-level error handling if needed.
 
 ### 4.5 CLI Entry Point — `cli/index.js`
 
@@ -895,7 +932,7 @@ module.exports = function testCommand(program) {
     .action(async (options) => {
       let engine;
       try {
-        engine = createEngine();
+        engine = await createEngine();
         
         const runOptions = { mode: options.mode };
         if (options.agent) {
@@ -960,7 +997,7 @@ module.exports = function statusCommand(program) {
     .action(async (options) => {
       let engine;
       try {
-        engine = createEngine({ quiet: true });
+        engine = await createEngine({ quiet: true });
         
         const limit = parseInt(options.limit, 10) || 10;
         const runs = await engine.status({ limit });
@@ -1023,7 +1060,7 @@ module.exports = function bugsCommand(program) {
     .action(async (options) => {
       let engine;
       try {
-        engine = createEngine({ quiet: true });
+        engine = await createEngine({ quiet: true });
         
         const limit = parseInt(options.limit, 10) || 20;
         const bugs = await engine.bugs(options.app, {
@@ -1129,16 +1166,7 @@ Add to the project's `package.json`:
 }
 ```
 
-And ensure dependencies include:
-
-```json
-{
-  "dependencies": {
-    "commander": "^12.0.0",
-    "dotenv": "^16.0.0"
-  }
-}
-```
+**Note:** `commander` (v14.0.3) and `dotenv` (v17.2.4) are already installed — no new dependencies needed.
 
 ---
 
@@ -1245,7 +1273,7 @@ afterEach(() => {
 });
 ```
 
-### 5.3 Engine Factory Tests — `tests/engine/factory.test.js` (~22 tests)
+### 5.3 Engine Factory Tests — `tests/engine/factory.test.js` (~24 tests)
 
 ```javascript
 const { 
@@ -1276,19 +1304,23 @@ describe('createEngine', () => {
   // Group 4: Shutdown (2 tests)
   test('shutdown closes database and state manager');
   test('shutdown handles already-closed database gracefully');
+  
+  // Group 5: Agent registration (2 tests)
+  test('engine.run() registers agents from default registry before orchestrator.run()');
+  test('engine.run() uses overridden agentRegistry when provided');
 });
 
 describe('ConsoleNotificationAdapter', () => {
   // Group 5: Fallback adapter behavior (2 tests)
-  test('send() returns success and tracks sent messages');
-  test('send() logs to console');
+  test('send(recipient, message) returns success and tracks sent messages');
+  test('send() logs recipient and message to console');
 });
 
 describe('RuleBasedLLMAdapter', () => {
   // Group 6: Rule-based classification (3 tests)
-  test('classifies crash-related text as critical severity');
-  test('classifies auth-related text as authentication category');
-  test('returns autoFixable=false for all classifications');
+  test('complete() classifies crash-related text as critical severity');
+  test('complete() classifies auth-related text as authentication category');
+  test('complete() returns autoFixable=false for all classifications');
 });
 
 describe('NullBugTrackerAdapter', () => {
@@ -1298,18 +1330,18 @@ describe('NullBugTrackerAdapter', () => {
 
 describe('FailureHandler', () => {
   // Group 8: Bridge pattern (4 tests)
-  test('calls bugDetector.detectAndReport for each failure');
-  test('returns array of created bugs');
-  test('returns empty array when no failures');
-  test('continues processing after individual failure error');
+  test('iterates agentResults and calls bugDetector.detectAndReport for each failed result');
+  test('passes agentId as string (not object) to detectAndReport');
+  test('returns empty array when no agentResults have failures');
+  test('continues processing after individual detectAndReport error');
 });
 ```
 
 **Mock pattern:** Use the override mechanism — no mocking of require/import needed.
 
 ```javascript
-test('creates engine with default config and in-memory DB', () => {
-  const engine = createEngine({
+test('creates engine with default config and in-memory DB', async () => {
+  const engine = await createEngine({
     config: {
       db: { path: ':memory:', inMemory: true },
       anthropic: { apiKey: null },
@@ -1328,8 +1360,8 @@ test('creates engine with default config and in-memory DB', () => {
   await engine.shutdown();
 });
 
-test('uses RuleBasedLLMAdapter when ANTHROPIC_API_KEY missing', () => {
-  const engine = createEngine({
+test('uses RuleBasedLLMAdapter when ANTHROPIC_API_KEY missing', async () => {
+  const engine = await createEngine({
     config: {
       db: { path: ':memory:', inMemory: true },
       anthropic: { apiKey: null },
@@ -1433,7 +1465,7 @@ function createMockEngine(overrides = {}) {
       passed: 4,
       failed: 1,
       skipped: 0,
-      bugs: []
+      agentResults: []
     }),
     status: jest.fn().mockResolvedValue([]),
     bugs: jest.fn().mockResolvedValue([]),
@@ -1442,8 +1474,11 @@ function createMockEngine(overrides = {}) {
   };
 }
 
-// Suppress console output in tests
 beforeEach(() => {
+  // createEngine is async — mock returns a resolved promise
+  const mockEngine = createMockEngine();
+  createEngine.mockResolvedValue(mockEngine);
+  
   jest.spyOn(console, 'log').mockImplementation();
   jest.spyOn(console, 'error').mockImplementation();
   jest.spyOn(process, 'exit').mockImplementation();
@@ -1462,13 +1497,13 @@ afterEach(() => {
 |---|---|---|
 | `tests/core/config.test.js` | 12 | Config loading, validation, defaults |
 | `tests/core/app-loader.test.js` | 10 | App config loading, directory scanning |
-| `tests/engine/factory.test.js` | 22 | Engine creation, adapter selection, fallbacks, failure handler |
+| `tests/engine/factory.test.js` | 24 | Engine creation, adapter selection, fallbacks, failure handler, agent registration |
 | `tests/cli/test-command.test.js` | 10 | CLI test command logic |
 | `tests/cli/status-command.test.js` | 8 | CLI status command logic |
 | `tests/cli/bugs-command.test.js` | 8 | CLI bugs command logic |
-| **Total** | **70** | |
+| **Total** | **72** | |
 
-**Running total after Day 5: ~1606 tests** (1536 existing + 70 new)
+**Running total after Day 5: ~1608 tests** (1536 existing + 72 new)
 
 ---
 
@@ -1494,12 +1529,18 @@ afterEach(() => {
 
 ### Modified Files
 
-- [ ] `core/engine/errors.js` — Add `ConfigError`, `AppLoaderError`
-- [ ] `package.json` — Add `bin`, `scripts.qa`, dependencies (`commander`, `dotenv`)
+- [ ] `core/engine/errors.js` — Add `AppLoaderError` (ConfigError stays in `core/config.js`)
+- [ ] `package.json` — Add `bin` field, `scripts.qa` (commander and dotenv already installed)
 
 ### Files NOT Modified
 
 All existing source files in `connectors/`, `agents/`, `core/engine/` (except errors.js), `core/database/`, `core/integrations/` remain untouched. All 1536 existing tests continue to pass.
+
+### Directories to Create
+
+- `tests/core/` — for config and app-loader tests
+- `tests/cli/` — for CLI command tests
+- `data/` — default database file location (created automatically by better-sqlite3 if needed)
 
 ---
 
@@ -1540,10 +1581,10 @@ All existing source files in `connectors/`, `agents/`, `core/engine/` (except er
 
 ### Functional
 
-- [ ] `createEngine()` with no env vars returns a working engine (all fallback adapters)
-- [ ] `createEngine()` with ANTHROPIC_API_KEY uses AnthropicAdapter
-- [ ] `createEngine()` with Twilio vars uses TwilioWhatsAppAdapter
-- [ ] `createEngine()` with Linear vars uses LinearClient
+- [ ] `await createEngine()` with no env vars returns a working engine (all fallback adapters)
+- [ ] `await createEngine()` with ANTHROPIC_API_KEY uses AnthropicAdapter
+- [ ] `await createEngine()` with Twilio vars uses TwilioWhatsAppAdapter
+- [ ] `await createEngine()` with Linear vars uses LinearClient
 - [ ] `engine.shutdown()` can be called multiple times without error
 - [ ] `loadConfig({})` returns valid config with all defaults
 - [ ] `loadAppConfig()` reads and validates app.config.json
@@ -1551,18 +1592,22 @@ All existing source files in `connectors/`, `agents/`, `core/engine/` (except er
 - [ ] CLI `test` command parses options and calls engine.run()
 - [ ] CLI `status` command displays formatted test run history
 - [ ] CLI `bugs` command displays filtered bug list
-- [ ] FailureHandler iterates failures and calls BugDetector per failure
-- [ ] RuleBasedLLMAdapter classifies bugs by keyword patterns
-- [ ] ConsoleNotificationAdapter logs and tracks messages
+- [ ] FailureHandler iterates OrchestratorResult.agentResults and calls BugDetector per failed result
+- [ ] FailureHandler passes agentId as string to detectAndReport()
+- [ ] RuleBasedLLMAdapter.complete() classifies bugs by keyword patterns
+- [ ] ConsoleNotificationAdapter.send(recipient, message) logs and tracks messages
+- [ ] engine.run() registers agents via orchestrator.registerAgent() before orchestrator.run()
+- [ ] engine.run() calls orchestrator.run() with agentIds (not agents)
 
 ### Non-functional
 
 - [ ] All 1536 existing tests still pass
-- [ ] 70 new tests pass
+- [ ] 72 new tests pass
 - [ ] No new files import from concrete adapter modules except `factory.js`
 - [ ] CLI commands call `engine.shutdown()` in all code paths (success, error)
 - [ ] `createEngine()` accepts dependency overrides for every component
 - [ ] Factory is the only file that imports concrete adapters + core components together
+- [ ] `config.js` has no dependencies on engine internals (standalone ConfigError extends Error)
 
 ---
 
@@ -1570,9 +1615,9 @@ All existing source files in `connectors/`, `agents/`, `core/engine/` (except er
 
 ```
 CLI Commands
-  └── createEngine() [factory.js]
+  └── await createEngine() [factory.js]
         ├── loadConfig() [config.js]         → env vars
-        ├── createDatabase() [database/]     → SQLite
+        ├── await createDatabase() [database/]  → SQLite
         ├── StateManager                     → db
         ├── AnthropicAdapter OR RuleBasedLLMAdapter
         ├── TwilioWhatsAppAdapter OR ConsoleNotificationAdapter
@@ -1581,12 +1626,56 @@ CLI Commands
         ├── BugDetector                      → llm, bugTracker, notifier, stateManager
         ├── AutoFixer                        → llm, stateManager, bugTracker, notifier
         ├── FailureHandler                   → bugDetector (bridge)
-        └── TestOrchestrator                 → connectorFactory, stateManager, notifier, failureHandler
+        ├── TestOrchestrator                 → ConnectorFactory (class ref), stateManager, notifier, failureHandler
+        └── defaultAgentRegistry             → HealerAgent, SentinelAgent, LibrarianAgent
 
-App Config Loading (separate from engine wiring):
+App Config Loading + Agent Registration (at engine.run() time):
   engine.run(appId)
-    └── loadAppConfig(appsDir, appId) [app-loader.js]
-          └── reads apps/<appId>/app.config.json
+    ├── loadAppConfig(appsDir, appId) [app-loader.js]
+    │     └── reads apps/<appId>/app.config.json
+    ├── orchestrator.registerAgent(agentId, AgentClass) for each requested agent
+    └── orchestrator.run(appConfig, { agentIds })
 ```
 
 The factory is the composition root. Everything above it (CLI) is a thin shell. Everything below it (adapters, engine components, database) knows nothing about the wiring.
+
+---
+
+## Appendix: Feasibility Review Changelog (v1.0 → v1.1)
+
+All fixes below were applied based on Claude Code's feasibility evaluation against the actual codebase.
+
+### Critical Fixes
+
+| # | Issue | Fix Applied |
+|---|---|---|
+| 1 | `orchestrator.runTests()` doesn't exist | Changed to `orchestrator.run()` with `agentIds` param (not `agents`) |
+| 2 | `db.testRuns.findAll()` doesn't exist | Changed to `db.testRuns.findMany({}, { orderBy, limit })` — separate `where` + `options` args |
+| 3 | `createEngine()` sync but `createDatabase()` async | Made `createEngine()` async, added `await` at all call sites |
+| 4 | Wrong ConnectorFactory path + instantiation | Fixed path to `../../connectors/factory`, pass class reference (not `new ConnectorFactory()`) |
+| 5 | `RuleBasedLLMAdapter.analyze()` — BugDetector calls `complete()` | Renamed to `complete(prompt, options)` matching LLMAdapter base class |
+| 6 | `ConsoleNotificationAdapter.send(recipients)` — base uses singular | Changed to `send(recipient, message)` matching NotificationAdapter base |
+| 7 | FailureHandler assumed `result.failures` — actual is OrchestratorResult | Rewrote to iterate `result.agentResults[].results[]` filtering by `status === 'failed'` |
+| 8 | `detectAndReport()` 2nd arg is `agentId` string, not object | Changed to pass `agentId` string from `agentResult.agentId` |
+
+### Moderate Fixes
+
+| # | Issue | Fix Applied |
+|---|---|---|
+| 9 | ConfigError defined in both `config.js` and `errors.js` | Removed from `errors.js`; standalone in `config.js` (extends Error, no engine deps) |
+| 12 | Orchestrator requires agent registration — factory never did it | Added `defaultAgentRegistry` mapping agent IDs → classes; `engine.run()` calls `orchestrator.registerAgent()` before `orchestrator.run()` |
+
+### Minor Fixes
+
+| # | Issue | Fix Applied |
+|---|---|---|
+| 13 | Missing `tests/core/`, `tests/cli/`, `data/` directories | Added "Directories to Create" section to file checklist |
+| 14 | `commander`/`dotenv` already installed | Updated package.json section — no new deps needed, just `bin` and `scripts` |
+
+### Items Confirmed OK (no changes needed)
+
+| # | Item |
+|---|---|
+| 10 | LinearClient constructor — factory guards with `validation.services.bugTracker` |
+| 11 | `apps/brainstormy/app.config.json` — correctly specified in new files list |
+| 15 | `.env.example` — correctly specified in new files list |
