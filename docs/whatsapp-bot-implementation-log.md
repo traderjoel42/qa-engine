@@ -32,4 +32,19 @@
   - 59 tests across 7 describe blocks: routing priority (5), approval (12), run command (15), status query (7), bugs query (8), help request (6), full integration (6)
 - **Test count:** 59 tests passing (spec estimated ~52)
 - **Deviations:** Added `.trim()` call in `parseRunCommand()` — spec regex didn't account for trailing whitespace but spec test expected it to work
+- **Commit:** c9092df
+
+---
+
+## Step 2: NotificationTemplates + Tests
+
+- **Files created:** `interfaces/whatsapp-bot/notification-templates.js`, `tests/whatsapp-bot/notification-templates.test.js`
+- **Status:** done
+- **Changes:**
+  - Created NotificationTemplates class with static methods: `runAcknowledgment()`, `runComplete()`, `statusReport()`, `bugsList()`, `approvalRequest()`, `approvalConfirmation()`, `bugDetail()`, `fixComplete()`, `fixFailed()`, `helpMenu()`, `unknownCommand()`, `unauthorized()`, `internalError()`, `_formatDuration()`, `_formatTime()`
+  - Evidence counts derived from raw arrays (`console_logs` filtered by `level==='error'`, `network_requests` filtered by `r.failed`)
+  - All bug record fields use snake_case matching DB
+  - 41 tests across 10 describe blocks: runAcknowledgment (5), runComplete (7), statusReport (4), bugsList (5), approvalRequest (3), approvalConfirmation (2), bugDetail (4), helpMenu (2), unknownCommand (3), utility methods (6)
+- **Test count:** 41 tests passing (spec estimated ~28)
+- **Deviations:** None — implemented verbatim from spec
 - **Commit:** pending
