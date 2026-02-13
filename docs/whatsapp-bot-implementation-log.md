@@ -47,4 +47,21 @@
   - 41 tests across 10 describe blocks: runAcknowledgment (5), runComplete (7), statusReport (4), bugsList (5), approvalRequest (3), approvalConfirmation (2), bugDetail (4), helpMenu (2), unknownCommand (3), utility methods (6)
 - **Test count:** 41 tests passing (spec estimated ~28)
 - **Deviations:** None — implemented verbatim from spec
+- **Commit:** 00b62b3
+
+---
+
+## Step 3: CommandHandler + Tests
+
+- **Files created:** `interfaces/whatsapp-bot/command-handler.js`, `tests/whatsapp-bot/command-handler.test.js`
+- **Status:** done
+- **Changes:**
+  - Created CommandHandler class with `handle()` router and individual handlers: `handleRun()`, `handleStatus()`, `handleBugs()`, `handleApprove()`, `handleReject()`, `handleInfo()`, `handleHelp()`, `handleUnknown()`
+  - `engine.run(appId, options)` and `engine.bugs(appId, options)` use two-parameter signatures
+  - `handleApprove`/`handleReject` check `result.action` before sending confirmation
+  - `handleInfo` unwraps `result.bug` from response envelope, checks `result.action === 'error'`
+  - `engine.run()` is fire-and-forget in `handleRun()`
+  - 46 tests across 11 describe blocks: constructor (4), routing (9), handleRun (7), handleStatus (3), handleBugs (3), handleApprove (5), handleReject (5), handleInfo (5), handleHelp (1), handleUnknown (2), error handling (2)
+- **Test count:** 46 tests passing (spec estimated ~45)
+- **Deviations:** None — implemented verbatim from spec
 - **Commit:** pending
