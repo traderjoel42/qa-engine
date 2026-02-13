@@ -245,9 +245,10 @@ CREATE INDEX IF NOT EXISTS idx_bugs_severity ON bugs(severity);
 CREATE INDEX IF NOT EXISTS idx_bugs_created ON bugs(created_at);
 
 -- Approvals
+-- NOTE: FK column is bug_ref_id (not bug_id) to avoid collision with bugs.bug_id (the human-readable BUG-NNN)
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
-  bug_id TEXT NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,
+  bug_ref_id TEXT NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,
   approval_id TEXT UNIQUE NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   notification_sent_at TEXT,
@@ -258,14 +259,15 @@ CREATE TABLE IF NOT EXISTS approvals (
   timeout_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_approvals_bug ON approvals(bug_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_bug ON approvals(bug_ref_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 CREATE INDEX IF NOT EXISTS idx_approvals_approval_id ON approvals(approval_id);
 
 -- Fixes
+-- NOTE: FK column is bug_ref_id (not bug_id) to avoid collision with bugs.bug_id (the human-readable BUG-NNN)
 CREATE TABLE IF NOT EXISTS fixes (
   id TEXT PRIMARY KEY,
-  bug_id TEXT NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,
+  bug_ref_id TEXT NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,
   app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'pending',
   fix_type TEXT NOT NULL,
@@ -279,7 +281,7 @@ CREATE TABLE IF NOT EXISTS fixes (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_fixes_bug ON fixes(bug_id);
+CREATE INDEX IF NOT EXISTS idx_fixes_bug ON fixes(bug_ref_id);
 CREATE INDEX IF NOT EXISTS idx_fixes_app ON fixes(app_id);
 CREATE INDEX IF NOT EXISTS idx_fixes_status ON fixes(status);
 
@@ -288,7 +290,7 @@ CREATE TABLE IF NOT EXISTS evidence_metadata (
   id TEXT PRIMARY KEY,
   app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   test_run_id TEXT REFERENCES test_runs(id) ON DELETE CASCADE,
-  bug_id TEXT REFERENCES bugs(id) ON DELETE SET NULL,
+  bug_ref_id TEXT REFERENCES bugs(id) ON DELETE SET NULL,
   type TEXT NOT NULL,
   file_path TEXT NOT NULL,
   file_size INTEGER,
@@ -297,14 +299,10 @@ CREATE TABLE IF NOT EXISTS evidence_metadata (
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_app ON evidence_metadata(app_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_test_run ON evidence_metadata(test_run_id);
-CREATE INDEX IF NOT EXISTS idx_evidence_bug ON evidence_metadata(bug_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_bug ON evidence_metadata(bug_ref_id);
 
--- Schema migrations tracking
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  version INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+-- NOTE: schema_migrations table is NOT created here.
+-- It is created by Migrator.initialize() before any migrations run.
 ```
 
 **SQLite adaptations from the PostgreSQL spec:**
@@ -488,7 +486,7 @@ class ApprovalRepository extends BaseRepository {
   findByApprovalId(approvalId) { /* findOne({ approval_id: approvalId }) */ }
   findPending()                { /* findMany({ status: 'pending' }) */ }
   findExpired()                { /* Raw SQL: pending + timeout_at < datetime('now') */ }
-  findByBug(bugId)             { /* findMany({ bug_id: bugId }) */ }
+  findByBug(bugRefId)          { /* findMany({ bug_ref_id: bugRefId }) */ }
 
   respond(id, status, respondedVia) {
     /* update with status, responded_at, responded_via */
@@ -505,7 +503,7 @@ class FixRepository extends BaseRepository {
     this._jsonColumns = ['generated_fix', 'safety_review', 'verification_result'];
   }
 
-  findByBug(bugId)        { /* findMany({ bug_id: bugId }) */ }
+  findByBug(bugRefId)        { /* findMany({ bug_ref_id: bugRefId }) */ }
   findByApp(appId, options) { /* findMany with app_id + options */ }
   findInProgress()        { /* findMany({ status: 'in-progress' }) */ }
 }
@@ -521,7 +519,7 @@ class EvidenceMetadataRepository extends BaseRepository {
   }
 
   findByTestRun(testRunId) { /* findMany with test_run_id filter */ }
-  findByBug(bugId)         { /* findMany with bug_id filter */ }
+  findByBug(bugRefId)         { /* findMany with bug_ref_id filter */ }
   findByType(appId, type)  { /* findMany with app_id + type filter */ }
   getStorageUsage(appId)   { /* Raw SQL: SUM(file_size) for app */ }
 }
@@ -1037,38 +1035,45 @@ await stateManager.updateFixStatus(bugId, 'verified', { verification_result });
 Following the project's established error pattern (from `bug-detector-adapters-implementation-spec.md`):
 
 ```javascript
-class DatabaseError extends Error {
+// Extends EngineError to maintain consistent error interface across the project.
+// EngineError provides: code, details, timestamp, toJSON()
+
+class DatabaseError extends EngineError {
   constructor(message, options = {}) {
-    super(message);
-    this.name = 'DatabaseError';
-    this.code = options.code || 'DB_ERROR';
-    this.cause = options.cause || null;
+    super(message, {
+      code: options.code || 'DB_ERROR',
+      details: options.details || null
+    });
+    this.name = this.constructor.name;
+    this.cause = options.cause || null;  // Node.js error chaining
   }
 }
 
 class ConnectionError extends DatabaseError {
   constructor(message, options = {}) {
     super(message, { ...options, code: options.code || 'CONNECTION_ERROR' });
-    this.name = 'ConnectionError';
   }
 }
 
 class MigrationError extends DatabaseError {
   constructor(message, options = {}) {
     super(message, { ...options, code: options.code || 'MIGRATION_ERROR' });
-    this.name = 'MigrationError';
   }
 }
 
-class StateManagerError extends Error {
+class StateManagerError extends EngineError {
   constructor(message, options = {}) {
-    super(message);
-    this.name = 'StateManagerError';
-    this.code = options.code || 'STATE_ERROR';
+    super(message, {
+      code: options.code || 'STATE_ERROR',
+      details: options.details || null
+    });
+    this.name = this.constructor.name;
     this.cause = options.cause || null;
   }
 }
 ```
+
+All errors extend `EngineError` from `core/errors.js`, inheriting `timestamp`, `details`, and `toJSON()` for consistency when errors flow through shared error handling paths. The `cause` field is added for Node.js error chaining (not present on EngineError but useful for wrapping SQLite errors).
 
 ---
 
@@ -1078,7 +1083,7 @@ class StateManagerError extends Error {
 
 ```json
 {
-  "better-sqlite3": "^11.x"
+  "better-sqlite3": "^12.x"
 }
 ```
 
