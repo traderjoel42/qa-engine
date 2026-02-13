@@ -61,12 +61,42 @@ Phase 2 (SaaS) adds user registration, app selection syntax ("@brainstormy run s
 The bot doesn't construct engine components directly. It calls the `createEngine()` factory (built Week 4 Day 5) which assembles the full stack: database → state manager → concrete adapters → orchestrator → bug detector → approval manager → auto-fixer.
 
 The bot interacts through the engine's public API surface:
-- `engine.run(options)` — trigger test runs
+- `engine.run(appId, options)` — trigger test runs
 - `engine.status()` — get active/recent run status
-- `engine.bugs(options)` — list bugs
+- `engine.bugs(appId, options)` — list bugs
 - `engine.approve(approvalId)` — approve a fix
 - `engine.reject(approvalId)` — reject a fix
 - `engine.bugInfo(approvalId)` — get detailed bug info
+
+**Implementation note — approve/reject/bugInfo:** These three methods do not yet exist on the engine object returned by `createEngine()`. The existing engine exposes `run()`, `status()`, `bugs()`, `shutdown()`, and `_internals`. As part of this spec's implementation, **add these methods to `core/engine/factory.js`** by delegating to `ApprovalManager.handleResponse()`:
+
+```javascript
+// Add to the engine object in createEngine() factory
+async approve(approvalId) {
+  return approvalManager.handleResponse(`YES-${approvalId}`);
+},
+async reject(approvalId) {
+  return approvalManager.handleResponse(`NO-${approvalId}`);
+},
+async bugInfo(approvalId) {
+  return approvalManager.handleResponse(`INFO-${approvalId}`);
+}
+```
+
+This keeps the `_internals` boundary clean — the WhatsApp bot never reaches through to `engine._internals.approvalManager` directly.
+
+**Implementation note — status() return shape:** The current `engine.status()` returns a flat `Array<TestRunRecord>` from the database. This spec expects `{ activeRuns: [], recentRuns: [] }`. **Enhance `engine.status()` in factory.js** to split runs into `activeRuns` (status='running') and `recentRuns` (completed in last 24h, capped at 10):
+
+```javascript
+// Replace the existing status() in createEngine() factory
+async status() {
+  const allRuns = await db.testRuns.findMany({ limit: 20 });
+  return {
+    activeRuns: allRuns.filter(r => r.status === 'running'),
+    recentRuns: allRuns.filter(r => r.status !== 'running').slice(0, 10)
+  };
+}
+```
 
 ### D4: Stateless Webhook Handler
 
@@ -961,7 +991,7 @@ class NotificationTemplates {
       lines.push('', `Recent runs (last 24h):`);
       for (const run of recentRuns) {
         const icon = run.failed === 0 ? '✅' : '❌';
-        const time = NotificationTemplates._formatTime(run.completedAt);
+        const time = NotificationTemplates._formatTime(run.completed_at);
         lines.push(`  ${icon} ${time} — ${run.mode || 'Full'} (${run.passed}/${run.total} passed)`);
       }
     }
@@ -977,10 +1007,10 @@ class NotificationTemplates {
     const lines = [`🐛 ${filter === 'all' ? 'All' : filter.charAt(0).toUpperCase() + filter.slice(1)} Bugs (${bugs.length})`, ''];
 
     for (const bug of bugs.slice(0, 10)) { // Max 10 in list
-      const statusLabel = bug.autoFixable
-        ? (bug.approvalStatus === 'pending' ? 'fix pending approval' : `fix ${bug.approvalStatus}`)
+      const statusLabel = bug.auto_fixable
+        ? (bug.approval_status === 'pending' ? 'fix pending approval' : `fix ${bug.approval_status}`)
         : 'manual fix needed';
-      lines.push(`• ${bug.bugId}: ${bug.title}`);
+      lines.push(`• ${bug.bug_id}: ${bug.title}`);
       lines.push(`  Severity: ${bug.severity} | ${statusLabel}`);
       lines.push('');
     }
@@ -996,14 +1026,14 @@ class NotificationTemplates {
     return [
       '🔴 Auto-Fix Available',
       '',
-      `${bug.bugId}: ${bug.title}`,
-      `Severity: ${bug.severity} | Agent: ${bug.detectedBy}`,
-      `Root cause: ${bug.rootCause}`,
+      `${bug.bug_id}: ${bug.title}`,
+      `Severity: ${bug.severity} | Agent: ${bug.detected_by}`,
+      `Root cause: ${bug.root_cause}`,
       '',
       'Approve fix?',
-      `  YES-${bug.approvalId}`,
-      `  NO-${bug.approvalId}`,
-      `  INFO-${bug.approvalId} (details)`
+      `  YES-${bug.approval_id}`,
+      `  NO-${bug.approval_id}`,
+      `  INFO-${bug.approval_id} (details)`
     ].join('\n');
   }
 
@@ -1027,19 +1057,19 @@ class NotificationTemplates {
 
   static bugDetail(bug) {
     const lines = [
-      `📋 Bug Detail: ${bug.bugId}`,
+      `📋 Bug Detail: ${bug.bug_id}`,
       '',
       `Title: ${bug.title}`,
       `Severity: ${bug.severity}`,
       `Category: ${bug.category}`,
-      `Agent: ${bug.detectedBy}`,
-      `Detected: ${NotificationTemplates._formatTime(bug.createdAt)}`,
+      `Agent: ${bug.detected_by}`,
+      `Detected: ${NotificationTemplates._formatTime(bug.created_at)}`,
       '',
       'Root Cause:',
-      bug.rootCause,
+      bug.root_cause,
       '',
-      `Affected Component: ${bug.affectedComponent}`,
-      `Likely Fix: ${bug.fixApproach}`,
+      `Affected Component: ${bug.affected_component}`,
+      `Likely Fix: ${bug.fix_approach}`,
     ];
 
     if (bug.evidence) {
@@ -1047,16 +1077,16 @@ class NotificationTemplates {
       if (bug.evidence.screenshots && bug.evidence.screenshots.length > 0) {
         lines.push(`• Screenshots: ${bug.evidence.screenshots.length}`);
       }
-      lines.push(`• Console errors: ${bug.evidence.consoleErrors || 0}`);
-      lines.push(`• Network failures: ${bug.evidence.networkFailures || 0}`);
+      lines.push(`• Console errors: ${bug.evidence.console_errors || 0}`);
+      lines.push(`• Network failures: ${bug.evidence.network_failures || 0}`);
     }
 
-    if (bug.externalIssueUrl) {
-      lines.push('', `Linear: ${bug.externalIssueUrl}`);
+    if (bug.external_issue_url) {
+      lines.push('', `Linear: ${bug.external_issue_url}`);
     }
 
-    if (bug.approvalId) {
-      lines.push(`Status: ${bug.approvalStatus || 'pending'} (${bug.approvalId})`);
+    if (bug.approval_id) {
+      lines.push(`Status: ${bug.approval_status || 'pending'} (${bug.approval_id})`);
     }
 
     return lines.join('\n');
@@ -1065,7 +1095,7 @@ class NotificationTemplates {
   static fixComplete(bug, fix) {
     const icon = fix.verified ? '✅' : '❌';
     const lines = [
-      `${icon} Fix ${fix.verified ? 'Verified' : 'Applied'}: ${bug.bugId}`,
+      `${icon} Fix ${fix.verified ? 'Verified' : 'Applied'}: ${bug.bug_id}`,
       '',
       bug.title,
       `Fix: ${fix.explanation || 'Applied automated fix'}`,
@@ -1078,8 +1108,8 @@ class NotificationTemplates {
       }
     }
 
-    if (bug.externalIssueUrl) {
-      lines.push('', `Linear issue updated: ${bug.externalIssueId} → Done`);
+    if (bug.external_issue_url) {
+      lines.push('', `Linear issue updated: ${bug.external_issue_id} → Done`);
     }
 
     return lines.join('\n');
@@ -1087,14 +1117,14 @@ class NotificationTemplates {
 
   static fixFailed(bug, reason) {
     return [
-      `❌ Fix Failed: ${bug.bugId}`,
+      `❌ Fix Failed: ${bug.bug_id}`,
       '',
       bug.title,
       `Reason: ${reason}`,
       'Action: Escalated to manual fix',
       '',
-      bug.externalIssueUrl
-        ? `Linear issue updated: ${bug.externalIssueId} → Needs Manual Fix`
+      bug.external_issue_url
+        ? `Linear issue updated: ${bug.external_issue_id} → Needs Manual Fix`
         : 'Please fix manually.'
     ].join('\n');
   }
@@ -1252,13 +1282,13 @@ class CommandHandler {
 
     // Kick off test run asynchronously (don't await completion)
     const runOptions = {
-      appId: this.defaultAppId,
       ...(mode && { mode }),
       ...(agents.length > 0 && { agents })
     };
 
     // Fire and forget — engine sends completion notification via its own notifier
-    this.engine.run(runOptions).catch(error => {
+    // engine.run() takes (appId, options) as two separate parameters
+    this.engine.run(this.defaultAppId, runOptions).catch(error => {
       // On unexpected failure, notify user
       this.notifier.send(
         message.from,
@@ -1286,8 +1316,8 @@ class CommandHandler {
    * Handle 'bugs' — query engine with status filter and send list.
    */
   async handleBugs(params, message) {
-    const bugs = await this.engine.bugs({
-      appId: this.defaultAppId,
+    // engine.bugs() takes (appId, options) as two separate parameters
+    const bugs = await this.engine.bugs(this.defaultAppId, {
       status: params.status
     });
     const responseMessage = NotificationTemplates.bugsList(bugs, params.status);
@@ -1828,9 +1858,9 @@ describe('CommandHandler', () => {
 
   describe('handleRun()', () => {
     test('sends acknowledgment immediately via notifier')
-    test('calls engine.run() with mode when specified')
-    test('calls engine.run() with agents when specified')
-    test('calls engine.run() with defaultAppId')
+    test('calls engine.run(appId, options) with defaultAppId as first arg')
+    test('calls engine.run() with mode in options when specified')
+    test('calls engine.run() with agents in options when specified')
     test('does not await engine.run() — fire and forget')
     test('sends error notification if engine.run() rejects')
     test('returns success with ack message')
@@ -1838,13 +1868,13 @@ describe('CommandHandler', () => {
 
   describe('handleStatus()', () => {
     test('calls engine.status()')
-    test('formats and sends status report')
+    test('formats activeRuns and recentRuns into status report')
     test('returns data from engine')
   })
 
   describe('handleBugs()', () => {
-    test('calls engine.bugs() with status filter')
-    test('calls engine.bugs() with defaultAppId')
+    test('calls engine.bugs(appId, options) with defaultAppId as first arg')
+    test('passes status filter in options')
     test('formats and sends bug list')
   })
 
@@ -1978,13 +2008,14 @@ describe('WebhookServer', () => {
 
 | File | Tests |
 |------|-------|
+| `tests/engine/factory.test.js` (new methods) | ~10 |
 | `tests/whatsapp-bot/message-parser.test.js` | ~52 |
 | `tests/whatsapp-bot/notification-templates.test.js` | ~28 |
 | `tests/whatsapp-bot/command-handler.test.js` | ~38 |
 | `tests/whatsapp-bot/server.test.js` | ~42 |
-| **Total new tests** | **~160** |
+| **Total new tests** | **~170** |
 | **Prior project tests** | **~1,500+** |
-| **Project total after** | **~1,660+** |
+| **Project total after** | **~1,670+** |
 
 ---
 
@@ -2022,7 +2053,7 @@ function createMockEngine(overrides = {}) {
           passed: 15,
           failed: 0,
           total: 15,
-          completedAt: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
           agents: ['Healer', 'Sentinel']
         }
       ]
@@ -2031,33 +2062,35 @@ function createMockEngine(overrides = {}) {
     bugs: jest.fn().mockResolvedValue([]),
 
     approve: jest.fn().mockResolvedValue({ 
-      success: true, 
-      approvalId: 'ABC-247',
+      action: 'YES',
+      approval_id: 'ABC-247',
+      message: 'Fix approved',
       status: 'approved' 
     }),
 
     reject: jest.fn().mockResolvedValue({ 
-      success: true, 
-      approvalId: 'ABC-247',
+      action: 'NO',
+      approval_id: 'ABC-247',
+      message: 'Fix rejected',
       status: 'rejected' 
     }),
 
     bugInfo: jest.fn().mockResolvedValue({
-      bugId: 'BUG-248',
+      bug_id: 'BUG-248',
       title: 'Memory recall failed',
       severity: 'medium',
       category: 'memory',
-      detectedBy: 'Sentinel',
-      rootCause: 'Search query mismatch',
-      affectedComponent: 'services/semantic-search.js',
-      fixApproach: 'Update query weighting',
-      approvalId: 'ABC-248',
-      approvalStatus: 'pending',
-      createdAt: new Date().toISOString(),
+      detected_by: 'Sentinel',
+      root_cause: 'Search query mismatch',
+      affected_component: 'services/semantic-search.js',
+      fix_approach: 'Update query weighting',
+      approval_id: 'ABC-248',
+      approval_status: 'pending',
+      created_at: new Date().toISOString(),
       evidence: {
         screenshots: ['screenshot-001.png'],
-        consoleErrors: 0,
-        networkFailures: 1
+        console_errors: 0,
+        network_failures: 1
       }
     }),
 
@@ -2127,7 +2160,7 @@ const response = await request(app)
   });
 
 expect(response.status).toBe(200);
-expect(engine.run).toHaveBeenCalledWith(expect.objectContaining({ mode: 'smoke' }));
+expect(engine.run).toHaveBeenCalledWith('brainstormy', expect.objectContaining({ mode: 'smoke' }));
 ```
 
 ---
@@ -2136,6 +2169,7 @@ expect(engine.run).toHaveBeenCalledWith(expect.objectContaining({ mode: 'smoke' 
 
 | File | Description | LOC (approx) |
 |------|-------------|--------------|
+| `core/engine/factory.js` *(modify)* | Add approve/reject/bugInfo methods, enhance status() | ~30 |
 | `interfaces/whatsapp-bot/message-parser.js` | Inbound message parsing | ~100 |
 | `interfaces/whatsapp-bot/notification-templates.js` | All message templates | ~220 |
 | `interfaces/whatsapp-bot/command-handler.js` | Command routing + engine interaction | ~170 |
@@ -2145,12 +2179,12 @@ expect(engine.run).toHaveBeenCalledWith(expect.objectContaining({ mode: 'smoke' 
 | `tests/whatsapp-bot/notification-templates.test.js` | Template unit tests | ~250 |
 | `tests/whatsapp-bot/command-handler.test.js` | Handler unit tests | ~300 |
 | `tests/whatsapp-bot/server.test.js` | Server integration tests | ~400 |
-| **Total** | **9 files** | **~1,995** |
+| **Total** | **1 modified + 9 new files** | **~2,025** |
 
 ### npm Dependencies
 
 ```bash
-npm install express
+# express already installed (v5.2.1)
 npm install --save-dev supertest
 ```
 
@@ -2159,6 +2193,12 @@ npm install --save-dev supertest
 ---
 
 ## 10. Claude Code Implementation Steps
+
+### Step 0: Engine Factory Enhancements
+
+Modify `core/engine/factory.js` to add three new methods to the engine object (`approve`, `reject`, `bugInfo`) that delegate to `ApprovalManager.handleResponse()`. Also enhance `engine.status()` to return `{ activeRuns, recentRuns }` instead of a flat array. Add tests for the new methods in `tests/engine/factory.test.js`.
+
+Verify: `npx jest tests/engine/factory.test.js --verbose` — existing tests pass + new tests for approve/reject/bugInfo/enhanced status.
 
 ### Step 1: MessageParser + Tests
 
@@ -2180,7 +2220,7 @@ Verify: `npx jest tests/whatsapp-bot/command-handler.test.js --verbose` — ~38 
 
 ### Step 4: WebhookServer + Tests
 
-Install `express` and `supertest`. Create `interfaces/whatsapp-bot/server.js` and `tests/whatsapp-bot/server.test.js`. Full HTTP-level integration tests.
+Install `supertest` (`express` already installed). Create `interfaces/whatsapp-bot/server.js` and `tests/whatsapp-bot/server.test.js`. Full HTTP-level integration tests.
 
 Verify: `npx jest tests/whatsapp-bot/server.test.js --verbose` — ~42 tests passing.
 
@@ -2194,7 +2234,7 @@ Verify: All 4 test files pass together: `npx jest tests/whatsapp-bot/ --verbose`
 
 Run the complete test suite: `npx jest --verbose`
 
-Verify: ~1,660+ tests passing, zero regressions.
+Verify: ~1,670+ tests passing (including new factory tests), zero regressions.
 
 ### Implementation Log
 
@@ -2211,19 +2251,22 @@ After each step, append to `docs/whatsapp-bot-implementation-log.md`:
 
 **Days 1-2 are complete when:**
 
+- [ ] `core/engine/factory.js` updated with `approve()`, `reject()`, `bugInfo()` methods and enhanced `status()` return shape
 - [ ] `interfaces/whatsapp-bot/message-parser.js` exists with full implementation
-- [ ] `interfaces/whatsapp-bot/notification-templates.js` exists with all 14 template methods
+- [ ] `interfaces/whatsapp-bot/notification-templates.js` exists with all 14 template methods (using snake_case DB field names)
 - [ ] `interfaces/whatsapp-bot/command-handler.js` exists routing all 8 command types
 - [ ] `interfaces/whatsapp-bot/server.js` exists with Express app, signature validation, authorization
 - [ ] `interfaces/whatsapp-bot/index.js` exports `createWhatsAppBot`, all classes
-- [ ] ~160 tests passing in `tests/whatsapp-bot/`
+- [ ] ~160 new tests passing in `tests/whatsapp-bot/`
 - [ ] Signature validation uses timing-safe HMAC-SHA1 comparison
 - [ ] Authorization checks sender against allowlist
 - [ ] All commands parse case-insensitively
-- [ ] Approval responses (`YES-ABC-247`) route to `engine.approve()`
+- [ ] Approval responses (`YES-ABC-247`) route to `engine.approve()` → `ApprovalManager.handleResponse()`
+- [ ] `engine.run(appId, options)` called with two parameters (appId first, options second)
+- [ ] `engine.bugs(appId, options)` called with two parameters (appId first, options second)
 - [ ] `engine.run()` is fire-and-forget (not awaited in webhook handler)
 - [ ] Webhook always returns 200 to Twilio (even on errors)
-- [ ] No regressions: `npx jest --verbose` — all ~1,660+ tests pass
+- [ ] No regressions: `npx jest --verbose` — all ~1,670+ tests pass
 - [ ] Implementation log updated at `docs/whatsapp-bot-implementation-log.md`
 
 **Manual validation (after Week 4 concrete adapters are wired):**
