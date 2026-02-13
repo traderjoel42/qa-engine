@@ -28,4 +28,13 @@
 - **Files created:** `core/engine/factory.js`
 - **Status:** done
 - **Deviations:** None — implemented verbatim from spec section 4.3
+- **Commit:** c5b27a7
+
+---
+
+## Step 4: Create CLI (cli/index.js + commands)
+
+- **Files created:** `cli/index.js`, `cli/commands/test.js`, `cli/commands/status.js`, `cli/commands/bugs.js`
+- **Status:** done
+- **Deviations:** None — implemented verbatim from spec sections 4.5-4.8. Made cli/index.js executable.
 - **Commit:** (see below)
