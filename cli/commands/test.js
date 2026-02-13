@@ -16,6 +16,7 @@ module.exports = function testCommand(program) {
     .requiredOption('--app <appId>', 'Application ID to test')
     .option('--agent <agentId>', 'Specific agent to run (omit for all enabled agents)')
     .option('--mode <mode>', 'Test mode: smoke, regression, full', 'smoke')
+    .option('--skip-bug-detection', 'Disable bug detection and Linear integration')
     .action(async (options) => {
       let engine;
       try {
@@ -24,6 +25,9 @@ module.exports = function testCommand(program) {
         const runOptions = { mode: options.mode };
         if (options.agent) {
           runOptions.agents = [options.agent];
+        }
+        if (options.skipBugDetection) {
+          runOptions.skipBugDetection = true;
         }
 
         console.log(`Running tests for "${options.app}"...`);

@@ -292,7 +292,7 @@ class TestOrchestrator {
     };
 
     // ── Step 6: Post-run hooks (all best-effort) ──
-    await this._runPostHooks(result);
+    await this._runPostHooks(result, options);
 
     return result;
   }
@@ -477,7 +477,7 @@ class TestOrchestrator {
   /**
    * Run post-execution hooks. All are best-effort — failures logged, never thrown.
    */
-  async _runPostHooks(result) {
+  async _runPostHooks(result, options = {}) {
     try {
       await this._storage.store(result);
     } catch (error) {
@@ -491,7 +491,8 @@ class TestOrchestrator {
     }
 
     // Only invoke failureHandler if there were failures or errors
-    if (result.overallStatus !== 'passed') {
+    // and bug detection hasn't been disabled via --skip-bug-detection
+    if (result.overallStatus !== 'passed' && !options.skipBugDetection) {
       try {
         await this._failureHandler.handle(result);
       } catch (error) {
