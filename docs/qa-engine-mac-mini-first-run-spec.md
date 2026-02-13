@@ -1,6 +1,6 @@
 # QA Engine: Mac Mini Environment Setup & First-Run Validation
 
-**Version:** 3.0  
+**Version:** 3.1  
 **Date:** February 13, 2026  
 **Phase:** 2, Task 1  
 **Prerequisite:** Phase 1 complete — run `npm test` on Mac Mini to confirm actual passing count  
@@ -9,6 +9,7 @@
 - v1.0: Initial spec (written against design docs, not codebase)
 - v2.0: Reconciled all naming/path/config mismatches with actual codebase (22 findings)
 - v3.0: Addresses execution pipeline gaps found in v2.0 deep evaluation (12 findings) — CLI browser lifecycle, scenario loading, scenario format compatibility, auth credential nesting, and `.gitignore` gaps
+- v3.1: Fixes 2 runtime failures and 2 code sample inaccuracies from v3.0 deep-trace evaluation (6 findings) — getBaseURL() override, assertion selector resolution, EvidenceCollector constructor signature, engine closure variable reference
 
 ---
 
@@ -56,6 +57,8 @@ Get a single successful smoke test run against the real Brainstormy staging envi
 
 **Impact:** The CLI command for first run: `node cli/index.js test --app brainstormy --agent healer --mode smoke`. Uses the existing `--mode` flag.
 
+**Note:** The `--mode` flag is passed through the CLI but `BaseAgent.getScenarios()` does not currently filter scenarios by mode — it returns all scenarios in the agent's config. Since all scenarios in the rewritten `smoke-tests.json` are smoke tests, this has no effect on the first run. Mode-based filtering can be added later if regression and full scenario sets are added to the same file.
+
 ### D4: Skip Bug Detection and Auto-Fix for First Run
 
 **Decision:** Add a `--skip-bug-detection` flag to the CLI `test` command. When set, the orchestrator still collects evidence on failure but does not invoke the Bug Detector, create Linear issues, or trigger approval workflows.
@@ -94,13 +97,32 @@ Get a single successful smoke test run against the real Brainstormy staging envi
 
 The v2.0 evaluation found that the execution pipeline (CLI → engine → orchestrator → agent → connector) has several gaps that must be closed before the smoke test command can reach the staging server. These are listed from most critical to least, with estimated effort revised based on the v2.0 deep-read evaluation.
 
-**Total estimated code changes: ~150–220 lines across 6–8 files.**
+**Total estimated code changes: ~160–230 lines across 6–8 files.**
 
-### Change A: Warm-Up Method in Connector
+### Change A: Warm-Up Method + getBaseURL() Override in Connector
 
-**File to modify:** `connectors/brainstormy/connector.js` (or `connectors/base-connector.js`)
+**File to modify:** `connectors/brainstormy/connector.js`
 
-**What:** Add a `warmUp()` method that performs an HTTP GET against the app's base URL to wake up Render services before browser automation begins. Call it from `initialize()`.
+**What:** Two additions to the BrainstormyConnector:
+
+**Part 1 — `getBaseURL()` override (RUNTIME FAILURE FIX):**
+
+The base class `BaseConnector.getBaseURL()` reads `this.app.environments?.[env]?.url`, but the config uses `baseUrl` not `url`. This means every relative-path navigation (e.g., `navigate("/")`, `navigate("/projects")`) will fail with `NavigationError: 'Base URL not configured'`. The connector's own `initialize()` bypasses this via `getEnvironment().baseUrl → page.goto()`, so auth works — but scenario actions that call `navigate()` with relative paths break.
+
+```javascript
+/**
+ * Override base getBaseURL() which reads environments[env].url (wrong key).
+ * Our config uses baseUrl at both top-level and environment level.
+ */
+getBaseURL() {
+  const env = this.app.activeEnvironment ?? 'staging';
+  return this.app.environments?.[env]?.baseUrl || this.app.baseUrl;
+}
+```
+
+**Part 2 — `warmUp()` method:**
+
+Performs an HTTP GET against the app's base URL to wake up Render services before browser automation begins. Called from `initialize()`.
 
 ```javascript
 /**
@@ -114,7 +136,7 @@ The v2.0 evaluation found that the execution pipeline (CLI → engine → orches
  * handshake), we add an explicit setTimeout as a hard deadline.
  */
 async warmUp() {
-  const url = this.app.baseUrl || this.app.environments?.staging?.baseUrl;
+  const url = this.getBaseURL();
   const timeoutMs = this.getTimeout('warmUp') || 120000;
 
   console.log(`Warming up ${url} (timeout: ${timeoutMs / 1000}s)...`);
@@ -123,15 +145,19 @@ async warmUp() {
   try {
     const https = require('https');
     await new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
+
       const req = https.get(url, { timeout: timeoutMs }, (res) => {
         res.resume(); // Drain response
-        resolve(res.statusCode);
+        clearTimeout(deadline);
+        settle(resolve, res.statusCode);
       });
-      req.on('timeout', () => { req.destroy(); reject(new Error('Warm-up timeout')); });
-      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); clearTimeout(deadline); settle(reject, new Error('Warm-up timeout')); });
+      req.on('error', (err) => { clearTimeout(deadline); settle(reject, err); });
 
       // Hard deadline fallback in case socket timeout doesn't fire
-      setTimeout(() => { req.destroy(); reject(new Error('Warm-up hard deadline')); }, timeoutMs + 5000);
+      const deadline = setTimeout(() => { req.destroy(); settle(reject, new Error('Warm-up hard deadline')); }, timeoutMs + 5000);
     });
 
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);
@@ -144,7 +170,7 @@ async warmUp() {
 
 Then in `initialize()`, call `await this.warmUp()` before the first `page.goto()`.
 
-**Estimated effort:** ~25 lines in one file.
+**Estimated effort:** ~35 lines in one file.
 
 ### Change B: --skip-bug-detection CLI Flag
 
@@ -172,23 +198,25 @@ if (result.status === 'failed' && !this._options.skipBugDetection) {
 
 ### Change C: Browser Lifecycle in CLI Test Command (CRITICAL)
 
-**Files to modify:** `cli/commands/test.js`, potentially `core/engine/factory.js`
+**Files to modify:** `core/engine/factory.js`, possibly `core/engine/test-orchestrator.js`
 
 **What:** The `TestOrchestrator._executeRun()` requires `options.page` (a Playwright Page instance) and `options.evidenceCollector` (an EvidenceCollector instance). Currently, `cli/commands/test.js` passes only `{ mode, agents }` to `engine.run()`, and nobody in the call chain creates a browser, page, or evidence collector. The orchestrator will throw `ConfigurationError: 'options.page (Playwright page instance) is required'` immediately.
 
-The CLI test command (or the `engine.run()` wrapper in `factory.js`) must:
+The `engine.run()` wrapper in `factory.js` must:
 
 1. Launch a Playwright Chromium browser
 2. Create a browser context and page
-3. Create an EvidenceCollector instance
+3. Create an EvidenceCollector instance (with correct constructor signature)
 4. Pass both into the orchestrator options
 5. Clean up the browser after the run completes (success or failure)
 
-**Implementation approach — add to `engine.run()` in `factory.js` so any caller benefits:**
+**Implementation approach — add to `engine.run()` in `factory.js`:**
+
+Note: `engine.run()` is defined as a method on an object literal inside `createEngine()`. It uses closure variables (e.g., `orchestrator`, `appConfig`), not `this._orchestrator`. The code sample below matches the actual pattern.
 
 ```javascript
 async run(appId, options = {}) {
-  // ... existing setup ...
+  // ... existing setup (appConfig loaded, agents registered, etc.) ...
 
   // Create browser and evidence collector if not provided
   let browser = null;
@@ -206,14 +234,23 @@ async run(appId, options = {}) {
 
   if (!options.evidenceCollector) {
     const EvidenceCollector = require('./engine/evidence-collector');
-    options.evidenceCollector = new EvidenceCollector({
-      basePath: `evidence/${appId}`,
-      page: options.page
+    // EvidenceCollector constructor requires { runId, appId, basePath }
+    // NOT { page } — page is attached via initialize() separately
+    const runId = `run-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+    const evidenceCollector = new EvidenceCollector({
+      runId,
+      appId,
+      basePath: './evidence'
     });
+    await evidenceCollector.initialize(options.page);
+    options.evidenceCollector = evidenceCollector;
+    options.runId = runId; // Pass to orchestrator so it uses this instead of generating its own
   }
 
   try {
-    return await this._orchestrator.run(appId, options);
+    // Uses closure variable 'orchestrator', passes appConfig (not appId)
+    const result = await orchestrator.run(appConfig, { ...options, agentIds });
+    return result;
   } finally {
     if (manageBrowser && browser) {
       await browser.close();
@@ -222,7 +259,9 @@ async run(appId, options = {}) {
 }
 ```
 
-**Estimated effort:** ~40–50 lines in `core/engine/factory.js`. May also need to verify EvidenceCollector constructor accepts these args (check actual constructor signature and adapt).
+The orchestrator's `_executeRun()` should also be checked — if it generates its own `runId`, it should prefer `options.runId` when provided to stay in sync with the EvidenceCollector's `runId`.
+
+**Estimated effort:** ~45–55 lines in `core/engine/factory.js`, ~5 lines in `core/engine/test-orchestrator.js` (runId check).
 
 ### Change D: Scenario Loading into Agent Config (CRITICAL)
 
@@ -343,7 +382,25 @@ The scenarios must use:
 
 **Important note about authentication:** The connector's `initialize()` method performs Clerk authentication automatically before any agents run. By the time `smoke-01-login` executes, the user is already logged in. The scenario's purpose is to verify the authenticated state is correct (userMenu visible, correct URL), not to perform the login itself. The scenario name is kept as "Login and Dashboard Load" for clarity about what's being validated, but the login action is handled by the connector lifecycle.
 
-**Estimated effort:** Rewrite the JSON file (~30 lines), no code changes needed if BaseAgent's assertion types are sufficient. If `element_exists` doesn't resolve selector keys from the config (e.g., `userMenu` → `[data-testid='user-menu']`), a small helper in BaseAgent may be needed (~10 lines).
+**Estimated effort:** Rewrite the JSON file (~30 lines) PLUS add assertion selector resolution to BaseAgent (~6 lines, see below).
+
+**Required: Assertion Selector Resolution in BaseAgent**
+
+The `element_exists` assertion type in `BaseAgent.evaluateAssertion()` passes the raw selector key (e.g., `"userMenu"`) directly to `connector.exists()`, which calls `page.$("userMenu")`. Playwright interprets this as a CSS selector for `<userMenu>` elements — which don't exist. The assertion will always fail even when the element IS visible.
+
+The connector has a `getSelector()` method that resolves key names to CSS selectors (e.g., `"userMenu"` → `"[data-testid='user-menu']"`), but `evaluateAssertion()` doesn't call it.
+
+**File to modify:** `agents/base-agent.js`, in `evaluateAssertion()`:
+
+```javascript
+case 'element_exists': {
+  const resolved = this.connector.getSelector?.(assertion.selector) || assertion.selector;
+  const exists = await this.connector.exists(resolved);
+  // ... rest of existing logic
+}
+```
+
+Apply the same resolution pattern to any other assertion types that accept selectors (e.g., `element_text_contains` if it exists). This ensures the selector config system works end-to-end — scenario files reference logical names, the config maps them to CSS selectors, and assertions resolve them before querying the DOM.
 
 ### Change F: .gitignore Update
 
@@ -616,7 +673,8 @@ npm test
 ```bash
 # Verify warm-up method exists
 node -e "const C = require('./connectors/brainstormy/connector'); \
-  console.log('warmUp:', typeof C.prototype.warmUp === 'function' ? 'EXISTS' : 'MISSING')"
+  console.log('warmUp:', typeof C.prototype.warmUp === 'function' ? 'EXISTS' : 'MISSING'); \
+  console.log('getBaseURL:', typeof C.prototype.getBaseURL === 'function' ? 'EXISTS' : 'MISSING')"
 
 # Verify --skip-bug-detection flag is recognized
 node cli/index.js test --help
@@ -942,8 +1000,8 @@ node -e "const c = require('./apps/brainstormy/app.config.json'); \
 2. `engine.run()` **(Change C)** launches Playwright browser, creates page + EvidenceCollector
 3. `engine.run()` calls `loadAppConfig('brainstormy')` which reads `app.config.json` (requires `id` field)
 4. `engine.run()` registers agents with scenario data **(Change D)** loaded from `scenarioFiles`
-5. Orchestrator calls `connector.initialize()` which performs Clerk auth automatically, then calls `warmUp()` **(Change A)**
-6. Healer agent runs scenarios from `smoke-tests.json` **(Change E)** — actions via connector, then evaluates assertions
+5. Orchestrator calls `connector.initialize()` which calls `warmUp()` **(Change A)** then performs Clerk auth automatically
+6. Healer agent runs scenarios from `smoke-tests.json` **(Change E)** — actions use `navigate()` which calls `getBaseURL()` **(Change A override)** to resolve the staging URL, then assertions resolve selector keys via `connector.getSelector()` **(Change E)**
 7. If a test fails and `--skip-bug-detection` **(Change B)** is set, FailureHandler is skipped
 8. `engine.run()` closes the browser in a `finally` block
 
@@ -1147,12 +1205,14 @@ All items must be checked before this task is complete:
 - [ ] `.env` file created with all required variables (correct names per `core/config.js`)
 - [ ] `.env` is in `.gitignore`
 
-### Code Changes (~150–220 lines across 6–8 files)
-- [ ] Change A: `warmUp()` method added to connector with hard deadline fallback, called from `initialize()`
+### Code Changes (~160–230 lines across 6–8 files)
+- [ ] Change A: `getBaseURL()` override added to BrainstormyConnector (resolves `baseUrl` key mismatch)
+- [ ] Change A: `warmUp()` method added to connector with hard deadline fallback + proper `clearTimeout`, called from `initialize()`
 - [ ] Change B: `--skip-bug-detection` flag threaded through CLI → `engine.run()` → orchestrator `_runPostHooks()` → FailureHandler
-- [ ] Change C: Browser lifecycle (launch, page, EvidenceCollector, teardown) added to `engine.run()` in `factory.js`
+- [ ] Change C: Browser lifecycle (launch, page, EvidenceCollector, teardown) added to `engine.run()` in `factory.js` — uses correct `EvidenceCollector({ runId, appId, basePath })` constructor + `initialize(page)`, and closure variable `orchestrator` (not `this._orchestrator`)
 - [ ] Change D: Scenario file loading added to agent registration in `factory.js`; `agents` block added to `app.config.json`
 - [ ] Change E: `smoke-tests.json` rewritten with separate `steps` (actions only) and `assertions` arrays using supported assertion types
+- [ ] Change E: Assertion selector resolution added to `BaseAgent.evaluateAssertion()` — resolves key names via `connector.getSelector()` before DOM queries
 - [ ] Change F: `data/*.db` added to `.gitignore`
 - [ ] All existing tests still pass after code changes
 
@@ -1238,6 +1298,17 @@ All items must be checked before this task is complete:
 | 10 | Auth done by connector, not by scenario steps | MODERATE | Noted in Step 8 pipeline description; scenario names clarified |
 | 11 | `connector.base` field unused | MINOR | Removed from config |
 | 12 | Evidence directory creation | MINOR | Already handled by `fs.mkdirSync` in verify-auth.js |
+
+### v3.0 → v3.1 Findings (6 items — all resolved in v3.1)
+
+| # | Finding | Severity | Resolution |
+|---|---------|----------|-----------|
+| 1 | `getBaseURL()` returns `undefined` — reads `environments[env].url` but config uses `baseUrl` | RUNTIME FAILURE | Added `getBaseURL()` override to Change A (~3 lines) |
+| 2 | `element_exists` assertions pass raw selector keys (`"userMenu"`) not CSS selectors | RUNTIME FAILURE | Added required selector resolution to Change E via `connector.getSelector()` (~6 lines) |
+| 3 | EvidenceCollector constructor requires `{ runId, appId, basePath }`, not `{ page }` | CODE FIX | Corrected Change C: generate `runId` in `engine.run()`, call `initialize(page)` separately |
+| 4 | Change C uses `this._orchestrator` but engine is object literal with closure vars | CODE FIX | Corrected Change C: uses closure variable `orchestrator`, passes `appConfig` not `appId` |
+| 5 | `--mode smoke` doesn't actually filter scenarios in `BaseAgent.getScenarios()` | MINOR | Noted in D3; non-blocking since all scenarios in rewritten file are smoke tests |
+| 6 | `setTimeout` in `warmUp()` never cleared on normal completion | MINOR | Added `clearTimeout(deadline)` and settled-flag pattern to Change A |
 
 ---
 
