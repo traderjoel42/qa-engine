@@ -1,9 +1,9 @@
 # QA Engine Week 5 Days 3-5: Real Brainstormy Connector & Scheduling
 
-**Version:** 1.0  
+**Version:** 1.1 (post-evaluation fixes)  
 **Date:** February 13, 2026  
 **Author:** Joel (with Claude)  
-**Status:** Ready for Claude Code Review  
+**Status:** Ready for Implementation  
 **Depends on:** qa-engine-03-connector-pattern-spec.md, whatsapp-bot-implementation-spec.md
 
 ---
@@ -61,7 +61,7 @@ This specification covers the final three days of QA Engine Week 5:
 - CSS class selectors are fragile but necessary for Brainstormy components that lack ARIA annotations
 - The selector map in `app.config.json` makes updates centralized when Brainstormy's UI changes
 
-**Implementation:** Selectors live in the app config, not hardcoded in the connector. The connector calls `this.getSelector('chat_input')` which resolves from config.
+**Implementation:** Selectors live in the app config, not hardcoded in the connector. The connector calls `this.getSelector('chatInput')` which resolves from config.
 
 ---
 
@@ -215,7 +215,7 @@ All full tests plus:
 
 **Rationale:**
 - Catches regressions before they reach staging
-- Uses the same `TestOrchestrator.runTests()` entry point as scheduled runs
+- Uses the same `TestOrchestrator.run()` entry point as scheduled runs
 - Exits with non-zero code to block push if smoke tests fail
 - Optional — developers can skip with `--no-verify`
 
@@ -228,29 +228,27 @@ All full tests plus:
 ```javascript
 /**
  * @typedef {Object} BrainstormyAppConfig
- * @property {string} app_id - 'brainstormy'
+ * @property {string} id - 'brainstormy' (not app_id — matches existing convention)
  * @property {string} name - 'Brainstormy'
- * @property {string} type - 'ai-chat'
- * @property {BrainstormyEnvironments} environments
+ * @property {string} type - 'ai-chat-app' (matches existing type, not 'ai-chat')
+ * @property {string} baseUrl - 'https://staging.brainstormy.app'
  * @property {BrainstormyConnectorConfig} connector
- * @property {BrainstormySelectorConfig} config
+ * @property {Object} [environments] - Optional per-environment overrides
  */
 
 /**
- * @typedef {Object} BrainstormyEnvironments
- * @property {BrainstormyEnvConfig} staging
- * @property {BrainstormyEnvConfig} [production]
- */
-
-/**
- * @typedef {Object} BrainstormyEnvConfig
- * @property {string} url - e.g. 'https://staging.brainstormy.app'
- * @property {BrainstormyAuth} auth
+ * @typedef {Object} BrainstormyConnectorConfig
+ * @property {string} type - 'ai-chat-app' (matches existing connector type)
+ * @property {Object} config
+ * @property {BrainstormyAuth} config.auth
+ * @property {Object<string, string>} config.selectors - camelCase selector keys
+ * @property {BrainstormyTimeouts} config.timeouts - camelCase timeout keys
+ * @property {string} config.testProjectName - 'QA Test Project'
  */
 
 /**
  * @typedef {Object} BrainstormyAuth
- * @property {string} type - 'clerk_email_password'
+ * @property {string} type - 'email_password'
  * @property {boolean} required - true
  * @property {BrainstormyCredentials} credentials
  */
@@ -258,75 +256,69 @@ All full tests plus:
 /**
  * @typedef {Object} BrainstormyCredentials
  * @property {string} email - 'testbot@brainstormy.app'
- * @property {string} password_env - 'BRAINSTORMY_TEST_PASSWORD'
- */
-
-/**
- * @typedef {Object} BrainstormySelectorConfig
- * @property {string} auth_indicator - Selector visible when logged in
- * @property {string} ready_indicator - Selector visible when app is loaded
- * @property {BrainstormySelectors} selectors
- * @property {BrainstormyTimeouts} timeouts
+ * @property {string} passwordEnv - 'BRAINSTORMY_TEST_PASSWORD' (camelCase)
  */
 
 /**
  * @typedef {Object} BrainstormySelectors
- * @property {string} clerk_email_input - Clerk email input in sign-in form
- * @property {string} clerk_password_input - Clerk password input
- * @property {string} clerk_submit_button - Clerk submit button
- * @property {string} user_menu - Logged-in user menu element
- * @property {string} sidebar_projects - Projects link in sidebar
- * @property {string} new_project_button - Create project button
- * @property {string} project_name_input - Project name input
- * @property {string} create_project_submit - Project creation submit
- * @property {string} new_story_button - Create story button
- * @property {string} story_name_input - Story name input
- * @property {string} story_vertical_select - Vertical selector dropdown
- * @property {string} create_story_submit - Story creation submit
- * @property {string} new_session_button - Create session button
- * @property {string} session_type_select - Session type selector
- * @property {string} create_session_submit - Session creation submit
- * @property {string} chat_input - Chat message input textarea
- * @property {string} chat_send - Send message button
- * @property {string} ai_message - AI response message container
- * @property {string} user_message - User message container
- * @property {string} generating_indicator - Streaming/generating indicator
- * @property {string} search_input - Search bar input
- * @property {string} search_submit - Search submit button
- * @property {string} search_results - Search results container
- * @property {string} search_result_item - Individual search result
- * @property {string} bible_tab - Story Bible tab/link
- * @property {string} bible_template_select - Bible template selector
- * @property {string} bible_generate_button - Generate bible button
- * @property {string} bible_section - Bible section container
- * @property {string} bible_generating_indicator - Bible generation progress
- * @property {string} report_tab - Reports tab/link
- * @property {string} report_type_select - Report type selector
- * @property {string} report_generate_button - Generate report button
- * @property {string} report_content - Report content container
- * @property {string} report_citation - Citation element in report
- * @property {string} bookmark_button - Bookmark message button
- * @property {string} bookmark_title_input - Bookmark title input
- * @property {string} bookmark_save_button - Bookmark save button
- * @property {string} bookmarks_tab - Bookmarks list tab/link
- * @property {string} bookmark_item - Individual bookmark in list
- * @property {string} session_list - Session list container
- * @property {string} session_item - Individual session in list
- * @property {string} session_summary_content - Session summary text
- * @property {string} end_session_button - End session button
- * @property {string} story_sidebar_item - Story item in sidebar nav
- * @property {string} logout_button - Logout button
+ * All keys use camelCase to match connector.config.selectors convention.
+ * @property {string} clerkEmailInput - Clerk email input in sign-in form
+ * @property {string} clerkPasswordInput - Clerk password input
+ * @property {string} clerkSubmitButton - Clerk submit button
+ * @property {string} userMenu - Logged-in user menu element
+ * @property {string} sidebarProjects - Projects link in sidebar
+ * @property {string} newProjectButton - Create project button
+ * @property {string} projectNameInput - Project name input
+ * @property {string} createProjectSubmit - Project creation submit
+ * @property {string} newStoryButton - Create story button
+ * @property {string} storyNameInput - Story name input
+ * @property {string} storyVerticalSelect - Vertical selector dropdown
+ * @property {string} createStorySubmit - Story creation submit
+ * @property {string} newSessionButton - Create session button
+ * @property {string} sessionTypeSelect - Session type selector
+ * @property {string} createSessionSubmit - Session creation submit
+ * @property {string} chatInput - Chat message input textarea
+ * @property {string} chatSend - Send message button
+ * @property {string} aiMessage - AI response message container
+ * @property {string} userMessage - User message container
+ * @property {string} generatingIndicator - Streaming/generating indicator
+ * @property {string} searchInput - Search bar input
+ * @property {string} searchSubmit - Search submit button
+ * @property {string} searchResults - Search results container
+ * @property {string} searchResultItem - Individual search result
+ * @property {string} bibleTab - Story Bible tab/link
+ * @property {string} bibleTemplateSelect - Bible template selector
+ * @property {string} bibleGenerateButton - Generate bible button
+ * @property {string} bibleSection - Bible section container
+ * @property {string} bibleGeneratingIndicator - Bible generation progress
+ * @property {string} reportTab - Reports tab/link
+ * @property {string} reportTypeSelect - Report type selector
+ * @property {string} reportGenerateButton - Generate report button
+ * @property {string} reportContent - Report content container
+ * @property {string} reportCitation - Citation element in report
+ * @property {string} bookmarkButton - Bookmark message button
+ * @property {string} bookmarkTitleInput - Bookmark title input
+ * @property {string} bookmarkSaveButton - Bookmark save button
+ * @property {string} bookmarksTab - Bookmarks list tab/link
+ * @property {string} bookmarkItem - Individual bookmark in list
+ * @property {string} sessionList - Session list container
+ * @property {string} sessionItem - Individual session in list
+ * @property {string} sessionSummaryContent - Session summary text
+ * @property {string} endSessionButton - End session button
+ * @property {string} storySidebarItem - Story item in sidebar nav
+ * @property {string} logoutButton - Logout button
  */
 
 /**
  * @typedef {Object} BrainstormyTimeouts
- * @property {number} ai_response - Max wait for AI response (ms), default 60000
- * @property {number} bible_generation - Max wait for bible gen (ms), default 120000
- * @property {number} report_generation - Max wait for report gen (ms), default 90000
+ * All keys use camelCase to match connector.config.timeouts convention.
+ * @property {number} aiResponse - Max wait for AI response (ms), default 60000
+ * @property {number} bibleGeneration - Max wait for bible gen (ms), default 120000
+ * @property {number} reportGeneration - Max wait for report gen (ms), default 90000
  * @property {number} navigation - Max wait for page navigation (ms), default 30000
  * @property {number} search - Max wait for search results (ms), default 15000
- * @property {number} session_summary - Max wait for summary gen (ms), default 60000
- * @property {number} clerk_auth - Max wait for Clerk auth flow (ms), default 30000
+ * @property {number} sessionSummary - Max wait for summary gen (ms), default 60000
+ * @property {number} clerkAuth - Max wait for Clerk auth flow (ms), default 30000
  */
 ```
 
@@ -379,12 +371,16 @@ All full tests plus:
 
 ## Part 3: Database Schema Additions
 
-### scheduled_runs Table
+### Migration File: `core/database/migrations/002_scheduled_runs.sql`
+
+> **Important:** Migrations live in `core/database/migrations/` as numbered `.sql` files.
+> The existing `Migrator` class discovers and applies them automatically via `createDatabase()`.
+> Do NOT add this SQL to `schema.sql` directly — use the migration file.
 
 ```sql
--- Add to core/database/schema.sql
+-- Migration 002: Add scheduled_runs table for cron-based test scheduling
 
-CREATE TABLE scheduled_runs (
+CREATE TABLE IF NOT EXISTS scheduled_runs (
   id TEXT PRIMARY KEY,  -- UUID as text for SQLite
   app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   
@@ -444,6 +440,21 @@ VALUES
 
 ## Part 4: BrainstormyConnector Implementation
 
+> **⚠️ DIFF-MERGE, NOT REPLACEMENT:** The existing `connectors/brainstormy/connector.js` (422 lines)
+> is already fully implemented with working `performAction()`, `createProject()`, `createStory()`,
+> `createSession()`, `generateStoryBible()`, `performSearch()`, `createBookmark()`, `generateReport()`,
+> `extractCitations()`, etc.
+>
+> **Do NOT replace the file wholesale.** Instead, diff-merge the following additions:
+> 1. Constructor state tracking (`currentProjectId`, `currentStoryId`, `currentSessionId`, `createdEntities`)
+> 2. Clerk-specific authentication flow in `authenticate()`
+> 3. `cleanup()` method with entity archiving
+> 4. `setupTestProject()` and `archiveTestData()` methods
+> 5. `getEnvironment()` update for multi-environment support
+>
+> The code below shows the complete target state. Claude Code should compare against the existing file
+> and apply only the missing pieces.
+
 ### File: `connectors/brainstormy/connector.js`
 
 ```javascript
@@ -488,7 +499,7 @@ class BrainstormyConnector extends AIAppConnector {
     const env = this.getEnvironment();
 
     // Navigate to app
-    await this.page.goto(env.url, { waitUntil: 'networkidle' });
+    await this.page.goto(env.baseUrl, { waitUntil: 'networkidle' });
     await this.collectEvidence('initial_load');
 
     // Authenticate
@@ -512,14 +523,14 @@ class BrainstormyConnector extends AIAppConnector {
   async authenticate() {
     const env = this.getEnvironment();
     const auth = env.auth;
-    const timeout = this.getTimeout('clerk_auth');
+    const timeout = this.getTimeout('clerkAuth');
 
     try {
       // Wait for Clerk sign-in form to render
       // Clerk may use a modal or embedded component
-      const emailSelector = this.getSelector('clerk_email_input');
-      const passwordSelector = this.getSelector('clerk_password_input');
-      const submitSelector = this.getSelector('clerk_submit_button');
+      const emailSelector = this.getSelector('clerkEmailInput');
+      const passwordSelector = this.getSelector('clerkPasswordInput');
+      const submitSelector = this.getSelector('clerkSubmitButton');
 
       await this.page.waitForSelector(emailSelector, { timeout });
 
@@ -527,7 +538,7 @@ class BrainstormyConnector extends AIAppConnector {
       await this.page.fill(emailSelector, auth.credentials.email);
       await this.page.fill(
         passwordSelector,
-        process.env[auth.credentials.password_env]
+        process.env[auth.credentials.passwordEnv]
       );
 
       // Submit
@@ -535,7 +546,7 @@ class BrainstormyConnector extends AIAppConnector {
 
       // Wait for redirect to dashboard
       await this.page.waitForSelector(
-        this.getSelector('user_menu'),
+        this.getSelector('userMenu'),
         { timeout }
       );
 
@@ -661,13 +672,13 @@ class BrainstormyConnector extends AIAppConnector {
    */
   async createProject(name) {
     await this.navigate('/projects');
-    await this.waitForSelector(this.getSelector('new_project_button'));
-    await this.page.click(this.getSelector('new_project_button'));
+    await this.waitForSelector(this.getSelector('newProjectButton'));
+    await this.page.click(this.getSelector('newProjectButton'));
 
     // Fill project name
-    await this.page.waitForSelector(this.getSelector('project_name_input'));
-    await this.page.fill(this.getSelector('project_name_input'), name);
-    await this.page.click(this.getSelector('create_project_submit'));
+    await this.page.waitForSelector(this.getSelector('projectNameInput'));
+    await this.page.fill(this.getSelector('projectNameInput'), name);
+    await this.page.click(this.getSelector('createProjectSubmit'));
 
     // Wait for navigation to new project
     await this.page.waitForNavigation({ waitUntil: 'networkidle' });
@@ -698,17 +709,17 @@ class BrainstormyConnector extends AIAppConnector {
       throw new Error('No project selected. Call createProject first.');
     }
 
-    await this.page.click(this.getSelector('new_story_button'));
-    await this.page.waitForSelector(this.getSelector('story_name_input'));
-    await this.page.fill(this.getSelector('story_name_input'), name);
+    await this.page.click(this.getSelector('newStoryButton'));
+    await this.page.waitForSelector(this.getSelector('storyNameInput'));
+    await this.page.fill(this.getSelector('storyNameInput'), name);
 
     // Select vertical if dropdown exists
-    const verticalSelector = this.getSelector('story_vertical_select');
+    const verticalSelector = this.getSelector('storyVerticalSelect');
     if (verticalSelector && await this.exists(verticalSelector)) {
       await this.page.selectOption(verticalSelector, vertical);
     }
 
-    await this.page.click(this.getSelector('create_story_submit'));
+    await this.page.click(this.getSelector('createStorySubmit'));
     await this.page.waitForNavigation({ waitUntil: 'networkidle' });
 
     // Extract story ID from URL: /stories/<uuid>
@@ -736,16 +747,16 @@ class BrainstormyConnector extends AIAppConnector {
       throw new Error('No story selected. Call createStory first.');
     }
 
-    await this.page.click(this.getSelector('new_session_button'));
-    await this.page.waitForSelector(this.getSelector('session_type_select'));
+    await this.page.click(this.getSelector('newSessionButton'));
+    await this.page.waitForSelector(this.getSelector('sessionTypeSelect'));
 
     // Select session type
-    const typeSelector = this.getSelector('session_type_select');
+    const typeSelector = this.getSelector('sessionTypeSelect');
     if (typeSelector && await this.exists(typeSelector)) {
       await this.page.selectOption(typeSelector, type);
     }
 
-    await this.page.click(this.getSelector('create_session_submit'));
+    await this.page.click(this.getSelector('createSessionSubmit'));
     await this.page.waitForNavigation({ waitUntil: 'networkidle' });
 
     // Extract session ID from URL: /sessions/<uuid>
@@ -766,7 +777,7 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {{ session_id: string, summary_generated: boolean }}
    */
   async endSession() {
-    const endButton = this.getSelector('end_session_button');
+    const endButton = this.getSelector('endSessionButton');
     if (!await this.exists(endButton)) {
       throw new Error('End session button not found — is a session active?');
     }
@@ -774,10 +785,10 @@ class BrainstormyConnector extends AIAppConnector {
     await this.page.click(endButton);
 
     // Wait for summary generation (may take time)
-    const timeout = this.getTimeout('session_summary');
+    const timeout = this.getTimeout('sessionSummary');
     try {
       await this.page.waitForSelector(
-        this.getSelector('session_summary_content'),
+        this.getSelector('sessionSummaryContent'),
         { timeout }
       );
       return { session_id: this.currentSessionId, summary_generated: true };
@@ -795,7 +806,7 @@ class BrainstormyConnector extends AIAppConnector {
     const sid = sessionId || this.currentSessionId;
 
     // Navigate to session list to find summary
-    const summarySelector = this.getSelector('session_summary_content');
+    const summarySelector = this.getSelector('sessionSummaryContent');
     if (await this.exists(summarySelector)) {
       const summary = await this.page.textContent(summarySelector);
       return { session_id: sid, summary };
@@ -813,21 +824,21 @@ class BrainstormyConnector extends AIAppConnector {
    */
   async generateStoryBible(template = 'standard') {
     // Navigate to Bible tab
-    await this.page.click(this.getSelector('bible_tab'));
-    await this.page.waitForSelector(this.getSelector('bible_template_select'));
+    await this.page.click(this.getSelector('bibleTab'));
+    await this.page.waitForSelector(this.getSelector('bibleTemplateSelect'));
 
     // Select template
     await this.page.selectOption(
-      this.getSelector('bible_template_select'),
+      this.getSelector('bibleTemplateSelect'),
       template
     );
 
     // Click generate
-    await this.page.click(this.getSelector('bible_generate_button'));
+    await this.page.click(this.getSelector('bibleGenerateButton'));
 
     // Wait for generation to complete (can take 30-120s)
-    const timeout = this.getTimeout('bible_generation');
-    const generatingIndicator = this.getSelector('bible_generating_indicator');
+    const timeout = this.getTimeout('bibleGeneration');
+    const generatingIndicator = this.getSelector('bibleGeneratingIndicator');
 
     // Wait for indicator to appear then disappear
     try {
@@ -858,8 +869,8 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {{ template: string, sections: Object }}
    */
   async getStoryBible(template = 'standard') {
-    await this.page.click(this.getSelector('bible_tab'));
-    await this.page.waitForSelector(this.getSelector('bible_section'));
+    await this.page.click(this.getSelector('bibleTab'));
+    await this.page.waitForSelector(this.getSelector('bibleSection'));
 
     const sections = await this.extractBibleSections();
     return { template, sections };
@@ -871,7 +882,7 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {Object} Map of section_key → { title, content, has_content }
    */
   async extractBibleSections() {
-    const sectionSelector = this.getSelector('bible_section');
+    const sectionSelector = this.getSelector('bibleSection');
     const sectionElements = await this.page.$$(sectionSelector);
 
     const sections = {};
@@ -906,10 +917,10 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {{ type: string, content: string, citations: Object }}
    */
   async generateReport(type, parameters = {}) {
-    await this.page.click(this.getSelector('report_tab'));
-    await this.page.waitForSelector(this.getSelector('report_type_select'));
+    await this.page.click(this.getSelector('reportTab'));
+    await this.page.waitForSelector(this.getSelector('reportTypeSelect'));
 
-    await this.page.selectOption(this.getSelector('report_type_select'), type);
+    await this.page.selectOption(this.getSelector('reportTypeSelect'), type);
 
     // Fill parameters if any (e.g., character name input)
     for (const [key, value] of Object.entries(parameters)) {
@@ -919,18 +930,18 @@ class BrainstormyConnector extends AIAppConnector {
       }
     }
 
-    await this.page.click(this.getSelector('report_generate_button'));
+    await this.page.click(this.getSelector('reportGenerateButton'));
 
     // Wait for report generation
-    const timeout = this.getTimeout('report_generation');
+    const timeout = this.getTimeout('reportGeneration');
     await this.page.waitForSelector(
-      this.getSelector('report_content'),
+      this.getSelector('reportContent'),
       { timeout }
     );
 
     // Extract content and citations
     const content = await this.page.textContent(
-      this.getSelector('report_content')
+      this.getSelector('reportContent')
     );
 
     const citations = await this.extractCitations();
@@ -946,11 +957,11 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {{ query: string, results: Array<{ text: string, source: string }>, count: number }}
    */
   async performSearch(query) {
-    const searchInput = this.getSelector('search_input');
+    const searchInput = this.getSelector('searchInput');
     await this.page.waitForSelector(searchInput);
     await this.page.fill(searchInput, query);
 
-    const searchSubmit = this.getSelector('search_submit');
+    const searchSubmit = this.getSelector('searchSubmit');
     if (searchSubmit && await this.exists(searchSubmit)) {
       await this.page.click(searchSubmit);
     } else {
@@ -960,12 +971,12 @@ class BrainstormyConnector extends AIAppConnector {
     // Wait for results
     const timeout = this.getTimeout('search');
     await this.page.waitForSelector(
-      this.getSelector('search_results'),
+      this.getSelector('searchResults'),
       { timeout }
     );
 
     // Extract results
-    const resultSelector = this.getSelector('search_result_item');
+    const resultSelector = this.getSelector('searchResultItem');
     const resultElements = await this.page.$$(resultSelector);
 
     const results = [];
@@ -988,7 +999,7 @@ class BrainstormyConnector extends AIAppConnector {
    */
   async createBookmark(messageIndex = 0, title = 'QA Test Bookmark') {
     // Find the message element
-    const messages = await this.page.$$(this.getSelector('ai_message'));
+    const messages = await this.page.$$(this.getSelector('aiMessage'));
     if (messages.length === 0) {
       throw new Error('No messages to bookmark');
     }
@@ -998,7 +1009,7 @@ class BrainstormyConnector extends AIAppConnector {
 
     // Hover to reveal bookmark button
     await targetMessage.hover();
-    const bookmarkBtn = await targetMessage.$(this.getSelector('bookmark_button'));
+    const bookmarkBtn = await targetMessage.$(this.getSelector('bookmarkButton'));
     if (!bookmarkBtn) {
       throw new Error('Bookmark button not found on message');
     }
@@ -1006,9 +1017,9 @@ class BrainstormyConnector extends AIAppConnector {
     await bookmarkBtn.click();
 
     // Fill title
-    await this.page.waitForSelector(this.getSelector('bookmark_title_input'));
-    await this.page.fill(this.getSelector('bookmark_title_input'), title);
-    await this.page.click(this.getSelector('bookmark_save_button'));
+    await this.page.waitForSelector(this.getSelector('bookmarkTitleInput'));
+    await this.page.fill(this.getSelector('bookmarkTitleInput'), title);
+    await this.page.click(this.getSelector('bookmarkSaveButton'));
 
     // Wait for confirmation
     await this.page.waitForTimeout(1000);
@@ -1022,10 +1033,10 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {{ bookmarks: Array<{ title: string, content: string }>, count: number }}
    */
   async getBookmarks(category) {
-    await this.page.click(this.getSelector('bookmarks_tab'));
-    await this.page.waitForSelector(this.getSelector('bookmark_item'));
+    await this.page.click(this.getSelector('bookmarksTab'));
+    await this.page.waitForSelector(this.getSelector('bookmarkItem'));
 
-    const bookmarkElements = await this.page.$$(this.getSelector('bookmark_item'));
+    const bookmarkElements = await this.page.$$(this.getSelector('bookmarkItem'));
 
     const bookmarks = [];
     for (const el of bookmarkElements) {
@@ -1050,7 +1061,7 @@ class BrainstormyConnector extends AIAppConnector {
    * @param {string} storyIdentifier - Story name or UUID
    */
   async navigateToStory(storyIdentifier) {
-    const storyItems = await this.page.$$(this.getSelector('story_sidebar_item'));
+    const storyItems = await this.page.$$(this.getSelector('storySidebarItem'));
     for (const item of storyItems) {
       const text = await item.textContent();
       const href = await item.getAttribute('href');
@@ -1068,7 +1079,7 @@ class BrainstormyConnector extends AIAppConnector {
    * @param {string} sessionIdentifier - Session name or UUID
    */
   async navigateToSession(sessionIdentifier) {
-    const sessionItems = await this.page.$$(this.getSelector('session_item'));
+    const sessionItems = await this.page.$$(this.getSelector('sessionItem'));
     for (const item of sessionItems) {
       const text = await item.textContent();
       const href = await item.getAttribute('href');
@@ -1091,7 +1102,7 @@ class BrainstormyConnector extends AIAppConnector {
    */
   async setupTestProject(name = 'QA Test Project') {
     await this.navigate('/projects');
-    await this.page.waitForSelector(this.getSelector('sidebar_projects'));
+    await this.page.waitForSelector(this.getSelector('sidebarProjects'));
 
     // Check if test project already exists
     const projectLinks = await this.page.$$('a[href*="/projects/"]');
@@ -1133,29 +1144,54 @@ class BrainstormyConnector extends AIAppConnector {
 
   /**
    * Get the current environment config.
-   * @returns {BrainstormyEnvConfig}
+   * Reads from the flat top-level config by default (baseUrl, connector.config.auth).
+   * If an explicit environment override exists (e.g., 'production'), merges those values.
+   * @param {string} [envName] - Optional environment name override
+   * @returns {{ baseUrl: string, auth: Object }}
    */
-  getEnvironment() {
-    const envName = this.app.config?.environment || 'staging';
-    return this.app.environments[envName];
+  getEnvironment(envName) {
+    const auth = this.app.connector?.config?.auth || {};
+    const baseConfig = {
+      baseUrl: this.app.baseUrl,
+      auth
+    };
+
+    // If an environment override exists, merge it
+    if (envName && this.app.environments?.[envName]) {
+      const envOverride = this.app.environments[envName];
+      return {
+        baseUrl: envOverride.baseUrl || baseConfig.baseUrl,
+        auth: {
+          ...baseConfig.auth,
+          ...envOverride.auth,
+          credentials: {
+            ...baseConfig.auth?.credentials,
+            ...envOverride.auth?.credentials
+          }
+        }
+      };
+    }
+
+    return baseConfig;
   }
 
   /**
    * Get a timeout value from config.
-   * @param {string} key - Timeout key
+   * Config uses camelCase keys (e.g., aiResponse, bibleGeneration).
+   * @param {string} key - Timeout key in camelCase
    * @returns {number} Timeout in ms
    */
   getTimeout(key) {
     const defaults = {
-      ai_response: 60000,
-      bible_generation: 120000,
-      report_generation: 90000,
+      aiResponse: 60000,
+      bibleGeneration: 120000,
+      reportGeneration: 90000,
       navigation: 30000,
       search: 15000,
-      session_summary: 60000,
-      clerk_auth: 30000
+      sessionSummary: 60000,
+      clerkAuth: 30000
     };
-    return this.app.config?.timeouts?.[key] || defaults[key];
+    return this.app.connector?.config?.timeouts?.[key] || defaults[key];
   }
 
   /**
@@ -1180,7 +1216,7 @@ class BrainstormyConnector extends AIAppConnector {
    */
   async navigate(path) {
     const env = this.getEnvironment();
-    const url = path.startsWith('http') ? path : `${env.url}${path}`;
+    const url = path.startsWith('http') ? path : `${env.baseUrl}${path}`;
     await this.page.goto(url, { waitUntil: 'networkidle' });
   }
 }
@@ -1190,86 +1226,92 @@ module.exports = BrainstormyConnector;
 
 ### File: `connectors/brainstormy/selectors.js`
 
+> **Role:** This file provides fallback default selectors for Brainstormy UI elements.
+> The primary selectors come from `app.config.json` under `connector.config.selectors` (camelCase keys).
+> The connector's `getSelector(key)` method (inherited from `BaseConnector`) reads from config first;
+> these defaults are merged in the constructor for any keys missing from config.
+
 ```javascript
 'use strict';
 
 /**
  * Default selectors for Brainstormy UI elements.
  * These serve as fallback values when not specified in app.config.json.
+ * Keys use camelCase to match the existing connector.config.selectors convention.
  * Ordered by priority: data-testid > role/aria > CSS class.
  */
 const DEFAULT_SELECTORS = {
   // Clerk Authentication
-  clerk_email_input: 'input[name="identifier"], input[type="email"]',
-  clerk_password_input: 'input[name="password"], input[type="password"]',
-  clerk_submit_button: 'button[data-localization-key="formButtonPrimary"], button[type="submit"]',
+  clerkEmailInput: 'input[name="identifier"], input[type="email"]',
+  clerkPasswordInput: 'input[name="password"], input[type="password"]',
+  clerkSubmitButton: 'button[data-localization-key="formButtonPrimary"], button[type="submit"]',
 
   // Auth state
-  user_menu: '[data-testid="user-menu"], [data-testid="user-button"]',
-  logout_button: '[data-testid="logout-button"], button:has-text("Sign out")',
+  userMenu: '[data-testid="user-menu"], [data-testid="user-button"]',
+  logoutButton: '[data-testid="logout-button"], button:has-text("Sign out")',
 
   // Navigation
-  sidebar_projects: '[data-testid="sidebar-projects"], a[href="/projects"]',
-  story_sidebar_item: '[data-testid="story-nav-item"], .sidebar-story-link',
+  sidebarProjects: '[data-testid="sidebar-projects"], a[href="/projects"]',
+  storySidebarItem: '[data-testid="story-nav-item"], .sidebar-story-link',
 
   // Project CRUD
-  new_project_button: '[data-testid="new-project-button"], button:has-text("New Project")',
-  project_name_input: '[data-testid="project-name-input"], input[name="project-name"]',
-  create_project_submit: '[data-testid="create-project-button"], button[type="submit"]',
+  newProjectButton: '[data-testid="new-project-button"], button:has-text("New Project")',
+  projectNameInput: '[data-testid="project-name-input"], input[name="project-name"]',
+  createProjectSubmit: '[data-testid="create-project-button"], button[type="submit"]',
 
   // Story CRUD
-  new_story_button: '[data-testid="new-story-button"], button:has-text("New Story")',
-  story_name_input: '[data-testid="story-name-input"], input[name="story-name"]',
-  story_vertical_select: '[data-testid="story-vertical-select"], select[name="vertical"]',
-  create_story_submit: '[data-testid="create-story-button"], button[type="submit"]',
+  newStoryButton: '[data-testid="new-story-button"], button:has-text("New Story")',
+  storyNameInput: '[data-testid="story-name-input"], input[name="story-name"]',
+  storyVerticalSelect: '[data-testid="story-vertical-select"], select[name="vertical"]',
+  createStorySubmit: '[data-testid="create-story-button"], button[type="submit"]',
 
   // Session CRUD
-  new_session_button: '[data-testid="new-session-button"], button:has-text("New Session")',
-  session_type_select: '[data-testid="session-type-select"], select[name="session-type"]',
-  create_session_submit: '[data-testid="create-session-button"], button[type="submit"]',
-  session_list: '[data-testid="session-list"], .session-list',
-  session_item: '[data-testid="session-item"], .session-list-item',
-  end_session_button: '[data-testid="end-session-button"], button:has-text("End Session")',
+  newSessionButton: '[data-testid="new-session-button"], button:has-text("New Session")',
+  sessionTypeSelect: '[data-testid="session-type-select"], select[name="session-type"]',
+  createSessionSubmit: '[data-testid="create-session-button"], button[type="submit"]',
+  sessionList: '[data-testid="session-list"], .session-list',
+  sessionItem: '[data-testid="session-item"], .session-list-item',
+  endSessionButton: '[data-testid="end-session-button"], button:has-text("End Session")',
 
   // Chat
-  chat_input: '[data-testid="chat-input"], textarea[placeholder*="message"]',
-  chat_send: '[data-testid="send-button"], button[aria-label="Send"]',
-  ai_message: '[data-testid="ai-message"], .message-assistant',
-  user_message: '[data-testid="user-message"], .message-user',
-  generating_indicator: '[data-testid="generating"], .streaming-indicator',
+  chatInput: '[data-testid="chat-input"], textarea[placeholder*="message"]',
+  chatSend: '[data-testid="send-button"], button[aria-label="Send"]',
+  aiMessage: '[data-testid="ai-message"], .message-assistant',
+  userMessage: '[data-testid="user-message"], .message-user',
+  generatingIndicator: '[data-testid="generating"], .streaming-indicator',
 
   // Search
-  search_input: '[data-testid="search-input"], input[placeholder*="Search"]',
-  search_submit: '[data-testid="search-submit"]',
-  search_results: '[data-testid="search-results"], .search-results',
-  search_result_item: '[data-testid="search-result-item"], .search-result',
+  searchInput: '[data-testid="search-input"], input[placeholder*="Search"]',
+  searchSubmit: '[data-testid="search-submit"]',
+  searchResults: '[data-testid="search-results"], .search-results',
+  searchResultItem: '[data-testid="search-result-item"], .search-result',
 
   // Bible
-  bible_tab: '[data-testid="bible-tab"], a[href*="bible"], button:has-text("Story Bible")',
-  bible_template_select: '[data-testid="bible-template-select"], select[name="template"]',
-  bible_generate_button: '[data-testid="bible-generate"], button:has-text("Generate")',
-  bible_section: '[data-testid="bible-section"], .bible-section',
-  bible_generating_indicator: '[data-testid="bible-generating"], .bible-progress',
+  bibleTab: '[data-testid="bible-tab"], a[href*="bible"], button:has-text("Story Bible")',
+  bibleTemplateSelect: '[data-testid="bible-template-select"], select[name="template"]',
+  bibleGenerateButton: '[data-testid="bible-generate"], button:has-text("Generate")',
+  bibleSection: '[data-testid="bible-section"], .bible-section',
+  bibleGeneratingIndicator: '[data-testid="bible-generating"], .bible-progress',
 
   // Reports
-  report_tab: '[data-testid="report-tab"], a[href*="reports"]',
-  report_type_select: '[data-testid="report-type-select"], select[name="report-type"]',
-  report_generate_button: '[data-testid="report-generate"], button:has-text("Generate")',
-  report_content: '[data-testid="report-content"], .report-content',
-  report_citation: '[data-citation-id], .citation-link',
+  reportTab: '[data-testid="report-tab"], a[href*="reports"]',
+  reportTypeSelect: '[data-testid="report-type-select"], select[name="report-type"]',
+  reportGenerateButton: '[data-testid="report-generate"], button:has-text("Generate")',
+  reportContent: '[data-testid="report-content"], .report-content',
+  reportCitation: '[data-citation-id], .citation-link',
 
   // Bookmarks
-  bookmark_button: '[data-testid="bookmark-button"], button[aria-label="Bookmark"]',
-  bookmark_title_input: '[data-testid="bookmark-title-input"], input[name="bookmark-title"]',
-  bookmark_save_button: '[data-testid="bookmark-save"], button:has-text("Save")',
-  bookmarks_tab: '[data-testid="bookmarks-tab"], a[href*="bookmarks"]',
-  bookmark_item: '[data-testid="bookmark-item"], .bookmark-list-item',
+  bookmarkButton: '[data-testid="bookmark-button"], button[aria-label="Bookmark"]',
+  bookmarkTitleInput: '[data-testid="bookmark-title-input"], input[name="bookmark-title"]',
+  bookmarkSaveButton: '[data-testid="bookmark-save"], button:has-text("Save")',
+  bookmarksTab: '[data-testid="bookmarks-tab"], a[href*="bookmarks"]',
+  bookmarkItem: '[data-testid="bookmark-item"], .bookmark-list-item',
 
   // Session summary
-  session_summary_content: '[data-testid="session-summary"], .session-summary-content',
+  sessionSummaryContent: '[data-testid="session-summary"], .session-summary-content',
 
   // App state
-  ready_indicator: '[data-testid="app-loaded"], #app-root'
+  readyIndicator: '[data-testid="app-loaded"], #app-root'
 };
 
 module.exports = DEFAULT_SELECTORS;
@@ -1281,60 +1323,117 @@ module.exports = DEFAULT_SELECTORS;
 
 ### File: `apps/brainstormy/app.config.json`
 
+> **Important:** This config conforms to the existing config shape used by `BaseConnector`, 
+> `GenericWebAppConnector`, and the existing BrainstormyConnector (422 lines). 
+> Key differences from the original spec draft: uses `id` (not `app_id`), `baseUrl` (not nested `environments`),
+> auth under `connector.config.auth`, selectors under `connector.config.selectors` with camelCase keys,
+> and `connector.type: "ai-chat-app"` (not `"brainstormy"`).
+
 ```json
 {
-  "app_id": "brainstormy",
+  "id": "brainstormy",
   "name": "Brainstormy",
-  "type": "ai-chat",
+  "type": "ai-chat-app",
+  "baseUrl": "https://staging.brainstormy.app",
 
-  "environments": {
-    "staging": {
-      "url": "https://staging.brainstormy.app",
+  "connector": {
+    "type": "ai-chat-app",
+    "config": {
       "auth": {
-        "type": "clerk_email_password",
+        "type": "email_password",
         "required": true,
         "credentials": {
           "email": "testbot@brainstormy.app",
-          "password_env": "BRAINSTORMY_TEST_PASSWORD"
+          "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
+        }
+      },
+      "selectors": {
+        "clerkEmailInput": "input[name=\"identifier\"], input[type=\"email\"]",
+        "clerkPasswordInput": "input[name=\"password\"], input[type=\"password\"]",
+        "clerkSubmitButton": "button[data-localization-key=\"formButtonPrimary\"], button[type=\"submit\"]",
+        "userMenu": "[data-testid=\"user-menu\"], [data-testid=\"user-button\"]",
+        "logoutButton": "[data-testid=\"logout-button\"], button:has-text(\"Sign out\")",
+        "sidebarProjects": "[data-testid=\"sidebar-projects\"], a[href=\"/projects\"]",
+        "storySidebarItem": "[data-testid=\"story-nav-item\"], .sidebar-story-link",
+        "newProjectButton": "[data-testid=\"new-project-button\"], button:has-text(\"New Project\")",
+        "projectNameInput": "[data-testid=\"project-name-input\"], input[name=\"project-name\"]",
+        "createProjectSubmit": "[data-testid=\"create-project-button\"], button[type=\"submit\"]",
+        "newStoryButton": "[data-testid=\"new-story-button\"], button:has-text(\"New Story\")",
+        "storyNameInput": "[data-testid=\"story-name-input\"], input[name=\"story-name\"]",
+        "storyVerticalSelect": "[data-testid=\"story-vertical-select\"], select[name=\"vertical\"]",
+        "createStorySubmit": "[data-testid=\"create-story-button\"], button[type=\"submit\"]",
+        "newSessionButton": "[data-testid=\"new-session-button\"], button:has-text(\"New Session\")",
+        "sessionTypeSelect": "[data-testid=\"session-type-select\"], select[name=\"session-type\"]",
+        "createSessionSubmit": "[data-testid=\"create-session-button\"], button[type=\"submit\"]",
+        "sessionList": "[data-testid=\"session-list\"], .session-list",
+        "sessionItem": "[data-testid=\"session-item\"], .session-list-item",
+        "endSessionButton": "[data-testid=\"end-session-button\"], button:has-text(\"End Session\")",
+        "chatInput": "[data-testid=\"chat-input\"], textarea[placeholder*=\"message\"]",
+        "chatSend": "[data-testid=\"send-button\"], button[aria-label=\"Send\"]",
+        "aiMessage": "[data-testid=\"ai-message\"], .message-assistant",
+        "userMessage": "[data-testid=\"user-message\"], .message-user",
+        "generatingIndicator": "[data-testid=\"generating\"], .streaming-indicator",
+        "searchInput": "[data-testid=\"search-input\"], input[placeholder*=\"Search\"]",
+        "searchSubmit": "[data-testid=\"search-submit\"]",
+        "searchResults": "[data-testid=\"search-results\"], .search-results",
+        "searchResultItem": "[data-testid=\"search-result-item\"], .search-result",
+        "bibleTab": "[data-testid=\"bible-tab\"], a[href*=\"bible\"], button:has-text(\"Story Bible\")",
+        "bibleTemplateSelect": "[data-testid=\"bible-template-select\"], select[name=\"template\"]",
+        "bibleGenerateButton": "[data-testid=\"bible-generate\"], button:has-text(\"Generate\")",
+        "bibleSection": "[data-testid=\"bible-section\"], .bible-section",
+        "bibleGeneratingIndicator": "[data-testid=\"bible-generating\"], .bible-progress",
+        "reportTab": "[data-testid=\"report-tab\"], a[href*=\"reports\"]",
+        "reportTypeSelect": "[data-testid=\"report-type-select\"], select[name=\"report-type\"]",
+        "reportGenerateButton": "[data-testid=\"report-generate\"], button:has-text(\"Generate\")",
+        "reportContent": "[data-testid=\"report-content\"], .report-content",
+        "reportCitation": "[data-citation-id], .citation-link",
+        "bookmarkButton": "[data-testid=\"bookmark-button\"], button[aria-label=\"Bookmark\"]",
+        "bookmarkTitleInput": "[data-testid=\"bookmark-title-input\"], input[name=\"bookmark-title\"]",
+        "bookmarkSaveButton": "[data-testid=\"bookmark-save\"], button:has-text(\"Save\")",
+        "bookmarksTab": "[data-testid=\"bookmarks-tab\"], a[href*=\"bookmarks\"]",
+        "bookmarkItem": "[data-testid=\"bookmark-item\"], .bookmark-list-item",
+        "sessionSummaryContent": "[data-testid=\"session-summary\"], .session-summary-content",
+        "readyIndicator": "[data-testid=\"app-loaded\"], #app-root"
+      },
+      "timeouts": {
+        "aiResponse": 60000,
+        "bibleGeneration": 120000,
+        "reportGeneration": 90000,
+        "navigation": 30000,
+        "search": 15000,
+        "sessionSummary": 60000,
+        "clerkAuth": 30000
+      },
+      "testProjectName": "QA Test Project"
+    }
+  },
+
+  "environments": {
+    "staging": {
+      "baseUrl": "https://staging.brainstormy.app",
+      "auth": {
+        "credentials": {
+          "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
         }
       }
     },
     "production": {
-      "url": "https://brainstormy.app",
+      "baseUrl": "https://brainstormy.app",
       "auth": {
-        "type": "clerk_email_password",
-        "required": true,
         "credentials": {
-          "email": "testbot@brainstormy.app",
-          "password_env": "BRAINSTORMY_PROD_TEST_PASSWORD"
+          "passwordEnv": "BRAINSTORMY_PROD_TEST_PASSWORD"
         }
       }
-    }
-  },
-
-  "connector": {
-    "type": "brainstormy",
-    "base": "ai-chat-app"
-  },
-
-  "config": {
-    "environment": "staging",
-    "auth_indicator": "[data-testid='user-menu']",
-    "ready_indicator": "[data-testid='app-loaded']",
-    "test_project_name": "QA Test Project",
-
-    "timeouts": {
-      "ai_response": 60000,
-      "bible_generation": 120000,
-      "report_generation": 90000,
-      "navigation": 30000,
-      "search": 15000,
-      "session_summary": 60000,
-      "clerk_auth": 30000
     }
   }
 }
 ```
+
+> **Note on environments:** The top-level `baseUrl` and `connector.config.auth` are the primary config.
+> The `environments` block is an optional override map — the connector reads `baseUrl` and auth from the 
+> top-level by default, and only overrides from `environments[env]` when an explicit environment is specified 
+> (e.g., for scheduled runs targeting production). This preserves backward compatibility with the existing 
+> flat config shape while adding multi-environment support for the scheduler.
 
 ---
 
@@ -1354,7 +1453,7 @@ module.exports = DEFAULT_SELECTORS;
       "name": "Login and Dashboard Load",
       "steps": [
         { "action": "navigate", "params": { "path": "/" } },
-        { "assert": "selector_visible", "selector": "user_menu", "message": "User menu should be visible after login" }
+        { "assert": "selector_visible", "selector": "userMenu", "message": "User menu should be visible after login" }
       ]
     },
     {
@@ -1374,7 +1473,7 @@ module.exports = DEFAULT_SELECTORS;
         { "action": "create_session", "params": { "type": "explore" } },
         { "action": "send_message", "params": { "text": "Hello, this is a smoke test message." } },
         { "action": "wait_for_response", "params": {} },
-        { "assert": "element_count_gte", "selector": "ai_message", "value": 1, "message": "Should have at least one AI response" }
+        { "assert": "element_count_gte", "selector": "aiMessage", "value": 1, "message": "Should have at least one AI response" }
       ]
     },
     {
@@ -1391,7 +1490,7 @@ module.exports = DEFAULT_SELECTORS;
       "name": "Navigate Between Views",
       "steps": [
         { "action": "navigate", "params": { "path": "/projects" } },
-        { "assert": "selector_visible", "selector": "sidebar_projects", "message": "Projects sidebar should be visible" },
+        { "assert": "selector_visible", "selector": "sidebarProjects", "message": "Projects sidebar should be visible" },
         { "action": "setup_test_project", "params": {} },
         { "assert": "url_contains", "value": "/projects/", "message": "Should navigate to project" }
       ]
@@ -1564,7 +1663,7 @@ module.exports = DEFAULT_SELECTORS;
 'use strict';
 
 const cron = require('node-cron');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const EventEmitter = require('events');
 
 /**
@@ -1582,21 +1681,25 @@ const EventEmitter = require('events');
 class Scheduler extends EventEmitter {
   /**
    * @param {Object} options
-   * @param {import('./database/models/scheduled-run-model')} options.scheduledRunModel
+   * @param {import('./database/repositories/scheduled-run-repository')} options.scheduledRunRepo
    * @param {import('./engine/test-orchestrator')} options.orchestrator
    * @param {import('./integrations/adapters/notification')} options.notifier
-   * @param {import('./database/models/test-run-model')} options.testRunModel
+   * @param {import('./database/repositories/test-run-repository')} options.testRunRepo
+   * @param {(appId: string) => Object} options.loadAppConfig - Function that loads appConfig by ID
+   * @param {string} [options.defaultRecipient] - Phone number for WhatsApp notifications
    */
-  constructor({ scheduledRunModel, orchestrator, notifier, testRunModel }) {
+  constructor({ scheduledRunRepo, orchestrator, notifier, testRunRepo, loadAppConfig, defaultRecipient }) {
     super();
 
     /** @type {Map<string, import('node-cron').ScheduledTask>} */
     this.activeTasks = new Map();
 
-    this.scheduledRunModel = scheduledRunModel;
+    this.scheduledRunRepo = scheduledRunRepo;
     this.orchestrator = orchestrator;
     this.notifier = notifier;
-    this.testRunModel = testRunModel;
+    this.testRunRepo = testRunRepo;
+    this.loadAppConfig = loadAppConfig;
+    this.defaultRecipient = defaultRecipient || process.env.WHATSAPP_DEFAULT_RECIPIENT;
 
     /** @type {boolean} */
     this.running = false;
@@ -1615,7 +1718,7 @@ class Scheduler extends EventEmitter {
       return;
     }
 
-    const schedules = await this.scheduledRunModel.getEnabled();
+    const schedules = await this.scheduledRunRepo.getEnabled();
     console.log(`Scheduler: Loading ${schedules.length} enabled schedule(s)`);
 
     for (const schedule of schedules) {
@@ -1693,14 +1796,18 @@ class Scheduler extends EventEmitter {
       // Notify start if configured
       if (schedule.notify_on_start) {
         await this.notifier.send(
-          null, // Default recipient
+          this.defaultRecipient,
           `🏃 Starting scheduled run: ${schedule.name}\n` +
           `Mode: ${schedule.test_mode} | Agents: ${JSON.parse(schedule.agents).join(', ')}`
         );
       }
 
+      // Load app configuration for the orchestrator
+      const appConfig = this.loadAppConfig(schedule.app_id);
+
       // Execute tests via orchestrator
-      const result = await this.orchestrator.runTests(schedule.app_id, {
+      // Note: orchestrator.run() expects (appConfig, options) — NOT (appId, options)
+      const result = await this.orchestrator.run(appConfig, {
         mode: schedule.test_mode,
         agents: JSON.parse(schedule.agents),
         environment: schedule.environment,
@@ -1710,7 +1817,7 @@ class Scheduler extends EventEmitter {
       });
 
       // Update schedule tracking
-      await this.scheduledRunModel.updateLastRun(schedule.id, {
+      await this.scheduledRunRepo.updateLastRun(schedule.id, {
         last_run_at: new Date().toISOString(),
         last_run_status: result.summary.failed > 0 ? 'failed' : 'passed',
         last_run_id: result.testRunId
@@ -1722,7 +1829,7 @@ class Scheduler extends EventEmitter {
 
       if (shouldNotify) {
         await this.notifier.send(
-          null,
+          this.defaultRecipient,
           this.formatCompletionMessage(schedule, result, startTime)
         );
       }
@@ -1732,14 +1839,14 @@ class Scheduler extends EventEmitter {
     } catch (error) {
       console.error(`Scheduler: Error in ${schedule.name}:`, error.message);
 
-      await this.scheduledRunModel.updateLastRun(schedule.id, {
+      await this.scheduledRunRepo.updateLastRun(schedule.id, {
         last_run_at: new Date().toISOString(),
         last_run_status: 'error'
       });
 
       // Always notify on errors
       await this.notifier.send(
-        null,
+        this.defaultRecipient,
         `❌ Scheduled run "${schedule.name}" failed with error:\n${error.message}`
       );
 
@@ -1780,14 +1887,26 @@ class Scheduler extends EventEmitter {
   async sendDailyDigest(schedule) {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    const runs = await this.testRunModel.getRunsSince(
+    const runs = await this.testRunRepo.getRunsSince(
       schedule.app_id,
       since
     );
 
+    // NOTE: getRunsSince() must be added to TestRunRepository.
+    // BaseRepository.findMany() only supports simple WHERE key = value,
+    // but this query needs a date comparison. Implementation:
+    //
+    //   getRunsSince(appId, sinceIso) {
+    //     return this.connection.db.prepare(
+    //       `SELECT * FROM test_runs
+    //        WHERE app_id = ? AND started_at >= ?
+    //        ORDER BY started_at DESC`
+    //     ).all(appId, sinceIso);
+    //   }
+
     if (runs.length === 0) {
       await this.notifier.send(
-        null,
+        this.defaultRecipient,
         `📊 Daily Digest: No test runs in the last 24 hours.`
       );
       return;
@@ -1826,7 +1945,7 @@ class Scheduler extends EventEmitter {
         : ''
     ].filter(Boolean).join('\n');
 
-    await this.notifier.send(null, message);
+    await this.notifier.send(this.defaultRecipient, message);
     this.emit('digest:sent', { date: new Date(), runs: runs.length });
   }
 
@@ -1839,7 +1958,7 @@ class Scheduler extends EventEmitter {
    */
   async createSchedule(config) {
     const schedule = {
-      id: config.id || uuidv4(),
+      id: config.id || crypto.randomUUID(),
       app_id: config.app_id,
       name: config.name,
       cron_expression: config.cron_expression,
@@ -1852,7 +1971,7 @@ class Scheduler extends EventEmitter {
       notify_only_failures: config.notify_only_failures ? 1 : 0
     };
 
-    await this.scheduledRunModel.create(schedule);
+    await this.scheduledRunRepo.create(schedule);
 
     if (schedule.enabled) {
       this.registerTask(schedule);
@@ -1870,7 +1989,7 @@ class Scheduler extends EventEmitter {
       this.activeTasks.get(scheduleId).stop();
       this.activeTasks.delete(scheduleId);
     }
-    await this.scheduledRunModel.setEnabled(scheduleId, false);
+    await this.scheduledRunRepo.setEnabled(scheduleId, false);
     console.log(`Scheduler: Paused ${scheduleId}`);
   }
 
@@ -1879,10 +1998,10 @@ class Scheduler extends EventEmitter {
    * @param {string} scheduleId
    */
   async resumeSchedule(scheduleId) {
-    const schedule = await this.scheduledRunModel.getById(scheduleId);
+    const schedule = await this.scheduledRunRepo.getById(scheduleId);
     if (!schedule) throw new Error(`Schedule ${scheduleId} not found`);
 
-    await this.scheduledRunModel.setEnabled(scheduleId, true);
+    await this.scheduledRunRepo.setEnabled(scheduleId, true);
     this.registerTask({ ...schedule, enabled: 1 });
     console.log(`Scheduler: Resumed ${scheduleId}`);
   }
@@ -1893,7 +2012,7 @@ class Scheduler extends EventEmitter {
    * @returns {Object} Test run result
    */
   async runNow(scheduleId) {
-    const schedule = await this.scheduledRunModel.getById(scheduleId);
+    const schedule = await this.scheduledRunRepo.getById(scheduleId);
     if (!schedule) throw new Error(`Schedule ${scheduleId} not found`);
 
     await this.executeSchedule(schedule);
@@ -1909,10 +2028,10 @@ class Scheduler extends EventEmitter {
       throw new Error(`Invalid cron expression: ${cronExpression}`);
     }
 
-    await this.scheduledRunModel.updateCron(scheduleId, cronExpression);
+    await this.scheduledRunRepo.updateCron(scheduleId, cronExpression);
 
     // Re-register if active
-    const schedule = await this.scheduledRunModel.getById(scheduleId);
+    const schedule = await this.scheduledRunRepo.getById(scheduleId);
     if (schedule && schedule.enabled) {
       this.registerTask(schedule);
     }
@@ -1925,8 +2044,8 @@ class Scheduler extends EventEmitter {
    */
   async listSchedules(appId) {
     const schedules = appId
-      ? await this.scheduledRunModel.getByApp(appId)
-      : await this.scheduledRunModel.getAll();
+      ? await this.scheduledRunRepo.getByApp(appId)
+      : await this.scheduledRunRepo.getAll();
 
     return schedules.map((s) => ({
       ...s,
@@ -1939,20 +2058,26 @@ class Scheduler extends EventEmitter {
 module.exports = Scheduler;
 ```
 
-### File: `core/database/models/scheduled-run-model.js`
+### File: `core/database/repositories/scheduled-run-repository.js`
+
+> **Important:** This follows the existing repository pattern. All data access extends `BaseRepository`
+> with its `connection` wrapper. Repositories are instantiated in `core/database/index.js` via
+> `createDatabase()` and provided to consumers as `db.scheduledRuns`.
 
 ```javascript
 'use strict';
 
+const BaseRepository = require('./base-repository');
+
 /**
- * Database model for scheduled_runs table.
+ * Repository for scheduled_runs table.
+ * Extends BaseRepository for consistency with existing data access patterns.
+ *
+ * @extends BaseRepository
  */
-class ScheduledRunModel {
-  /**
-   * @param {import('better-sqlite3').Database} db
-   */
-  constructor(db) {
-    this.db = db;
+class ScheduledRunRepository extends BaseRepository {
+  constructor(connection) {
+    super(connection, 'scheduled_runs');
   }
 
   /**
@@ -1960,7 +2085,7 @@ class ScheduledRunModel {
    * @returns {ScheduledRun[]}
    */
   getEnabled() {
-    return this.db
+    return this.connection.db
       .prepare('SELECT * FROM scheduled_runs WHERE enabled = 1')
       .all();
   }
@@ -1970,7 +2095,7 @@ class ScheduledRunModel {
    * @returns {ScheduledRun[]}
    */
   getAll() {
-    return this.db
+    return this.connection.db
       .prepare('SELECT * FROM scheduled_runs ORDER BY created_at')
       .all();
   }
@@ -1981,7 +2106,7 @@ class ScheduledRunModel {
    * @returns {ScheduledRun[]}
    */
   getByApp(appId) {
-    return this.db
+    return this.connection.db
       .prepare('SELECT * FROM scheduled_runs WHERE app_id = ? ORDER BY created_at')
       .all(appId);
   }
@@ -1992,29 +2117,33 @@ class ScheduledRunModel {
    * @returns {ScheduledRun|null}
    */
   getById(id) {
-    return this.db
+    return this.connection.db
       .prepare('SELECT * FROM scheduled_runs WHERE id = ?')
       .get(id) || null;
   }
 
   /**
    * Create a new schedule.
-   * @param {ScheduledRun} schedule
+   * Uses crypto.randomUUID() for ID generation, consistent with BaseRepository._generateId().
+   * @param {Partial<ScheduledRun>} schedule
+   * @returns {ScheduledRun}
    */
   create(schedule) {
-    this.db.prepare(`
+    const id = schedule.id || this._generateId();
+    this.connection.db.prepare(`
       INSERT INTO scheduled_runs (
         id, app_id, name, cron_expression, test_mode, agents,
         environment, enabled, notify_on_start, notify_on_complete,
         notify_only_failures
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      schedule.id, schedule.app_id, schedule.name,
+      id, schedule.app_id, schedule.name,
       schedule.cron_expression, schedule.test_mode, schedule.agents,
-      schedule.environment, schedule.enabled,
-      schedule.notify_on_start, schedule.notify_on_complete,
-      schedule.notify_only_failures
+      schedule.environment, schedule.enabled ?? 1,
+      schedule.notify_on_start ?? 0, schedule.notify_on_complete ?? 1,
+      schedule.notify_only_failures ?? 0
     );
+    return this.getById(id);
   }
 
   /**
@@ -2023,7 +2152,7 @@ class ScheduledRunModel {
    * @param {Object} data
    */
   updateLastRun(id, data) {
-    this.db.prepare(`
+    this.connection.db.prepare(`
       UPDATE scheduled_runs
       SET last_run_at = ?, last_run_status = ?, last_run_id = ?,
           updated_at = datetime('now')
@@ -2037,7 +2166,7 @@ class ScheduledRunModel {
    * @param {boolean} enabled
    */
   setEnabled(id, enabled) {
-    this.db.prepare(`
+    this.connection.db.prepare(`
       UPDATE scheduled_runs SET enabled = ?, updated_at = datetime('now')
       WHERE id = ?
     `).run(enabled ? 1 : 0, id);
@@ -2049,7 +2178,7 @@ class ScheduledRunModel {
    * @param {string} cronExpression
    */
   updateCron(id, cronExpression) {
-    this.db.prepare(`
+    this.connection.db.prepare(`
       UPDATE scheduled_runs SET cron_expression = ?, updated_at = datetime('now')
       WHERE id = ?
     `).run(cronExpression, id);
@@ -2060,11 +2189,21 @@ class ScheduledRunModel {
    * @param {string} id
    */
   delete(id) {
-    this.db.prepare('DELETE FROM scheduled_runs WHERE id = ?').run(id);
+    this.connection.db.prepare('DELETE FROM scheduled_runs WHERE id = ?').run(id);
   }
 }
 
-module.exports = ScheduledRunModel;
+module.exports = ScheduledRunRepository;
+```
+
+**Registration in `core/database/index.js`:**
+
+```javascript
+// Add to createDatabase() function:
+const ScheduledRunRepository = require('./repositories/scheduled-run-repository');
+
+// In the return block alongside existing repositories:
+scheduledRuns: new ScheduledRunRepository(connection),
 ```
 
 ---
@@ -2113,30 +2252,63 @@ set -e
 
 echo "📅 QA Engine: Setting up scheduler..."
 
-# Run database migration to add scheduled_runs table
-node scripts/migrate.js
+# Run database initialization (which runs Migrator.migrate() automatically)
+# This applies any pending migrations including 002_scheduled_runs.sql
+node -e "
+const { createDatabase } = require('./core/database');
+const db = createDatabase();
+console.log('Database initialized and migrations applied.');
+"
 
 # Seed default schedules
 node -e "
-const db = require('./core/database/connection').getDb();
-const ScheduledRunModel = require('./core/database/models/scheduled-run-model');
-const model = new ScheduledRunModel(db);
+const { createDatabase } = require('./core/database');
+const db = createDatabase();
+const scheduledRuns = db.scheduledRuns;
 
 // Check if already seeded
-const existing = model.getAll();
+const existing = scheduledRuns.getAll();
 if (existing.length > 0) {
   console.log('Schedules already exist, skipping seed.');
   process.exit(0);
 }
 
-// Insert defaults (from schema seed SQL)
-db.exec(\`
-  INSERT INTO scheduled_runs (id, app_id, name, cron_expression, test_mode, agents, environment, enabled, notify_on_complete)
-  VALUES
-    ('sched-nightly-full', 'brainstormy', 'Nightly Full Suite', '0 2 * * *', 'full', '[\"healer\",\"sentinel\",\"librarian\"]', 'staging', 1, 1),
-    ('sched-weekly-regression', 'brainstormy', 'Weekly Regression', '0 3 * * 0', 'regression', '[\"healer\",\"sentinel\",\"librarian\"]', 'staging', 1, 1),
-    ('sched-daily-digest', 'brainstormy', 'Daily Digest', '0 8 * * *', 'digest', '[]', 'staging', 1, 1);
-\`);
+// Seed defaults using the repository
+scheduledRuns.create({
+  id: 'sched-nightly-full',
+  app_id: 'brainstormy',
+  name: 'Nightly Full Suite',
+  cron_expression: '0 2 * * *',
+  test_mode: 'full',
+  agents: JSON.stringify(['healer', 'sentinel', 'librarian']),
+  environment: 'staging',
+  enabled: 1,
+  notify_on_complete: 1
+});
+
+scheduledRuns.create({
+  id: 'sched-weekly-regression',
+  app_id: 'brainstormy',
+  name: 'Weekly Regression',
+  cron_expression: '0 3 * * 0',
+  test_mode: 'regression',
+  agents: JSON.stringify(['healer', 'sentinel', 'librarian']),
+  environment: 'staging',
+  enabled: 1,
+  notify_on_complete: 1
+});
+
+scheduledRuns.create({
+  id: 'sched-daily-digest',
+  app_id: 'brainstormy',
+  name: 'Daily Digest',
+  cron_expression: '0 8 * * *',
+  test_mode: 'digest',
+  agents: JSON.stringify([]),
+  environment: 'staging',
+  enabled: 1,
+  notify_on_complete: 1
+});
 
 console.log('Default schedules seeded.');
 "
@@ -2150,6 +2322,31 @@ echo "   Start with: npm run start:scheduler"
 ## Part 9: WhatsApp Bot Schedule Commands
 
 These commands extend the WhatsApp bot from Days 1-2 to support schedule management.
+
+> **Integration with existing WhatsApp architecture:**
+> The WhatsApp bot uses `MessageParser.parse()` → `CommandHandler.handle()` pipeline.
+> `MessageParser` has fixed regex-based routing with priority order.
+>
+> **Required integration steps:**
+> 1. Add schedule command patterns to `MessageParser.parse()`:
+>    ```javascript
+>    // In MessageParser — add to pattern list (after existing patterns):
+>    { pattern: /^schedules$/i, type: 'schedule', command: 'list' },
+>    { pattern: /^pause\s+(.+)/i, type: 'schedule', command: 'pause' },
+>    { pattern: /^resume\s+(.+)/i, type: 'schedule', command: 'resume' },
+>    { pattern: /^(.+)\s+now$/i, type: 'schedule', command: 'run_now' },
+>    { pattern: /^change\s+(.+)\s+to\s+(.+)/i, type: 'schedule', command: 'update_cron' },
+>    { pattern: /^digest$/i, type: 'schedule', command: 'digest' },
+>    ```
+> 2. In `CommandHandler.handle()`, add routing for `type: 'schedule'`:
+>    ```javascript
+>    case 'schedule':
+>      return await this.scheduleHandler.handle(parsed.raw);
+>    ```
+> 3. Inject `ScheduleHandler` into `CommandHandler` constructor.
+>
+> The `ScheduleHandler.canHandle()` method below is retained for standalone use and testing,
+> but in production, routing is handled by `MessageParser`.
 
 ### File: `interfaces/whatsapp-bot/handlers/schedule-handler.js`
 
@@ -2355,62 +2552,32 @@ module.exports = ScheduleHandler;
 
 ---
 
-## Part 10: Connector Factory Update
+## Part 10: Connector Factory — No Changes Needed
 
-### File: Update to `connectors/factory.js`
+> **Important:** The existing `connectors/factory.js` already registers BrainstormyConnector and should NOT be replaced.
+
+The current factory has features the spec's simplified version would lose:
+
+- `CONNECTOR_REGISTRY` static property (used by existing tests)
+- `{ skipInitialize }` option on `create()` (used in unit tests to avoid full browser init)
+- `getRegisteredTypes()` method (used for introspection)
+- `ConnectorError` class from `./errors` (structured error handling)
+- `register()` uses `ConnectorFactory.CONNECTOR_REGISTRY` (not `this.connectors`)
+
+The BrainstormyConnector is already registered in the factory's `CONNECTOR_REGISTRY` as:
 
 ```javascript
-'use strict';
+'brainstormy': BrainstormyConnector
+```
 
-const GenericWebAppConnector = require('./generic-web-app/connector');
-const AIAppConnector = require('./ai-chat-app/connector');
+**Action for Claude Code:** Verify `BrainstormyConnector` is registered. If not, add it via:
+
+```javascript
+// In connectors/factory.js — add to CONNECTOR_REGISTRY and imports
 const BrainstormyConnector = require('./brainstormy/connector');
 
-/**
- * Factory to instantiate the correct connector for an app.
- */
-class ConnectorFactory {
-  /**
-   * Known connector types → classes.
-   * @type {Object<string, typeof import('./base-connector')>}
-   */
-  static connectors = {
-    generic: GenericWebAppConnector,
-    'ai-chat-app': AIAppConnector,
-    brainstormy: BrainstormyConnector
-  };
-
-  /**
-   * Create and initialize a connector for the given app.
-   * @param {Object} app - App configuration
-   * @param {import('playwright').Page} page - Playwright page
-   * @param {import('../core/engine/evidence-collector')} evidenceCollector
-   * @returns {import('./base-connector')} Initialized connector
-   */
-  static async create(app, page, evidenceCollector) {
-    const connectorType = app.connector?.type || 'generic';
-    const ConnectorClass = this.connectors[connectorType];
-
-    if (!ConnectorClass) {
-      throw new Error(`Unknown connector type: ${connectorType}`);
-    }
-
-    const connector = new ConnectorClass(app, page, evidenceCollector);
-    await connector.initialize();
-    return connector;
-  }
-
-  /**
-   * Register a new connector type.
-   * @param {string} type
-   * @param {typeof import('./base-connector')} ConnectorClass
-   */
-  static register(type, ConnectorClass) {
-    this.connectors[type] = ConnectorClass;
-  }
-}
-
-module.exports = ConnectorFactory;
+// In CONNECTOR_REGISTRY:
+'brainstormy': BrainstormyConnector
 ```
 
 ---
@@ -2523,7 +2690,7 @@ describe('Scheduler', () => {
   describe('executeSchedule()', () => {
     test('prevents concurrent execution of same schedule');
     test('sends start notification when configured');
-    test('calls orchestrator.runTests with correct params');
+    test('calls orchestrator.run with appConfig and correct options');
     test('updates last_run_at and status after completion');
     test('notifies on completion when configured');
     test('notifies only on failures when notify_only_failures set');
@@ -2578,12 +2745,12 @@ describe('ScheduleHandler', () => {
 });
 ```
 
-### Test: `tests/database/scheduled-run-model.test.js`
+### Test: `tests/database/scheduled-run-repository.test.js`
 
 ```javascript
 // Target: 10 tests
 
-describe('ScheduledRunModel', () => {
+describe('ScheduledRunRepository', () => {
   test('getEnabled returns only enabled schedules');
   test('getAll returns all schedules ordered by created_at');
   test('getByApp filters by app_id');
@@ -2660,7 +2827,7 @@ function createMockEvidenceCollector() {
  */
 function createMockOrchestrator() {
   return {
-    runTests: jest.fn().mockResolvedValue({
+    run: jest.fn().mockResolvedValue({
       testRunId: 'run-mock-123',
       summary: {
         total_tests: 15,
@@ -2676,11 +2843,13 @@ function createMockOrchestrator() {
 }
 ```
 
-### Mock SQLite Database (for ScheduledRunModel tests)
+### Mock SQLite Database (for ScheduledRunRepository tests)
 
 ```javascript
 /**
- * Create an in-memory SQLite database for model tests.
+ * Create an in-memory SQLite database wrapped in a connection object
+ * for ScheduledRunRepository tests.
+ * The connection wrapper matches the shape expected by BaseRepository.
  */
 function createTestDb() {
   const Database = require('better-sqlite3');
@@ -2708,7 +2877,8 @@ function createTestDb() {
     );
   `);
 
-  return db;
+  // Return connection wrapper matching BaseRepository expectations
+  return { db };
 }
 ```
 
@@ -2718,22 +2888,22 @@ function createTestDb() {
 
 | File | Purpose | LOC (est.) |
 |---|---|---|
-| `connectors/brainstormy/connector.js` | BrainstormyConnector class | ~450 |
-| `connectors/brainstormy/selectors.js` | Default selector definitions | ~80 |
-| `connectors/factory.js` | Updated ConnectorFactory with Brainstormy | ~50 |
-| `apps/brainstormy/app.config.json` | App configuration | ~60 |
+| `connectors/brainstormy/connector.js` | BrainstormyConnector diff-merge additions | ~450 |
+| `connectors/brainstormy/selectors.js` | Default selector definitions (camelCase) | ~80 |
+| `apps/brainstormy/app.config.json` | App configuration (existing shape) | ~80 |
 | `apps/brainstormy/scenarios/smoke-tests.json` | Smoke test scenarios | ~70 |
 | `apps/brainstormy/scenarios/memory-tests.json` | Memory/Sentinel scenarios | ~120 |
 | `apps/brainstormy/scenarios/bible-tests.json` | Bible/Librarian scenarios | ~100 |
-| `core/scheduler.js` | Scheduler class with node-cron | ~320 |
-| `core/database/models/scheduled-run-model.js` | ScheduledRunModel DB operations | ~100 |
+| `core/scheduler.js` | Scheduler class with node-cron | ~330 |
+| `core/database/migrations/002_scheduled_runs.sql` | Migration for scheduled_runs table | ~25 |
+| `core/database/repositories/scheduled-run-repository.js` | ScheduledRunRepository (extends BaseRepository) | ~110 |
 | `interfaces/whatsapp-bot/handlers/schedule-handler.js` | WhatsApp schedule commands | ~180 |
 | `scripts/pre-deploy.sh` | Git pre-push hook | ~25 |
 | `scripts/setup-scheduler.sh` | Scheduler setup script | ~40 |
 | `tests/connectors/brainstormy-connector.test.js` | Connector unit tests | ~300 |
 | `tests/core/scheduler.test.js` | Scheduler unit tests | ~280 |
 | `tests/whatsapp-bot/schedule-handler.test.js` | Schedule handler tests | ~150 |
-| `tests/database/scheduled-run-model.test.js` | Model unit tests | ~120 |
+| `tests/database/scheduled-run-repository.test.js` | Model unit tests | ~120 |
 | `tests/mocks/playwright-page.js` | Mock page factory | ~30 |
 | `tests/mocks/evidence-collector.js` | Mock evidence collector | ~15 |
 | `tests/mocks/orchestrator.js` | Mock orchestrator | ~20 |
@@ -2777,23 +2947,27 @@ console.log('performSearch' in b ? 'PASS' : 'FAIL', '- has performSearch');
 "
 ```
 
-**Step 4:** Update `connectors/factory.js`
+**Step 4:** Verify `connectors/factory.js` already registers BrainstormyConnector
 ```bash
-# Verify: Factory can resolve 'brainstormy' type
+# Verify: Factory can resolve 'brainstormy' type (no changes needed to factory)
 node -e "
 const F = require('./connectors/factory');
-console.log('brainstormy' in F.connectors ? 'PASS' : 'FAIL', '- brainstormy registered');
+console.log('brainstormy' in F.CONNECTOR_REGISTRY ? 'PASS' : 'FAIL', '- brainstormy registered');
+console.log(typeof F.create === 'function' ? 'PASS' : 'FAIL', '- create method exists');
+console.log(typeof F.getRegisteredTypes === 'function' ? 'PASS' : 'FAIL', '- getRegisteredTypes exists');
 "
 ```
 
 **Step 5:** Create `apps/brainstormy/app.config.json`
 ```bash
-# Verify: Config is valid JSON and has required fields
+# Verify: Config is valid JSON and has required fields (existing shape)
 node -e "
 const c = require('./apps/brainstormy/app.config.json');
-console.log(c.app_id === 'brainstormy' ? 'PASS' : 'FAIL', '- app_id');
-console.log(c.environments.staging.url ? 'PASS' : 'FAIL', '- staging URL');
-console.log(c.connector.type === 'brainstormy' ? 'PASS' : 'FAIL', '- connector type');
+console.log(c.id === 'brainstormy' ? 'PASS' : 'FAIL', '- id');
+console.log(c.baseUrl ? 'PASS' : 'FAIL', '- baseUrl');
+console.log(c.connector.type === 'ai-chat-app' ? 'PASS' : 'FAIL', '- connector type');
+console.log(c.connector.config.auth ? 'PASS' : 'FAIL', '- auth config');
+console.log(c.connector.config.selectors.chatInput ? 'PASS' : 'FAIL', '- selectors (camelCase)');
 "
 ```
 
@@ -2845,17 +3019,21 @@ console.log(typeof p.goto === 'function' ? 'PASS' : 'FAIL', '- mock page');
 
 ### Day 5: Scheduler + Cron (Steps 11-16)
 
-**Step 11:** Add scheduled_runs migration
+**Step 11:** Create `core/database/migrations/002_scheduled_runs.sql` and verify
 ```bash
-# Add to schema and run migration
-node scripts/migrate.js
-sqlite3 database/qa.db ".schema scheduled_runs"
-# Should show CREATE TABLE scheduled_runs ...
+# Create migration file, then run database init (Migrator applies it automatically)
+node -e "
+const { createDatabase } = require('./core/database');
+const db = createDatabase();
+// Verify table exists
+const tables = db.connection.db.prepare(\"SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_runs'\").all();
+console.log(tables.length > 0 ? 'PASS' : 'FAIL', '- scheduled_runs table created');
+"
 ```
 
-**Step 12:** Implement `core/database/models/scheduled-run-model.js`
+**Step 12:** Implement `core/database/repositories/scheduled-run-repository.js`
 ```bash
-npm test -- tests/database/scheduled-run-model.test.js
+npm test -- tests/database/scheduled-run-repository.test.js
 # Expected: 10 tests pass
 ```
 
@@ -2864,7 +3042,7 @@ npm test -- tests/database/scheduled-run-model.test.js
 # Verify: Scheduler loads and has correct API
 node -e "
 const S = require('./core/scheduler');
-const s = new S({scheduledRunModel:{getEnabled:()=>[]},orchestrator:{},notifier:{},testRunModel:{}});
+const s = new S({scheduledRunRepo:{getEnabled:()=>[]},orchestrator:{},notifier:{},testRunRepo:{},loadAppConfig:()=>({})});
 console.log('start' in s ? 'PASS' : 'FAIL', '- has start');
 console.log('stop' in s ? 'PASS' : 'FAIL', '- has stop');
 console.log('createSchedule' in s ? 'PASS' : 'FAIL', '- has createSchedule');
@@ -2903,7 +3081,7 @@ bash scripts/setup-scheduler.sh
 npm test -- tests/connectors/brainstormy-connector.test.js \
             tests/core/scheduler.test.js \
             tests/whatsapp-bot/schedule-handler.test.js \
-            tests/database/scheduled-run-model.test.js
+            tests/database/scheduled-run-repository.test.js
 
 # Expected: 71 tests, 71 passing
 ```
@@ -2938,7 +3116,7 @@ npm test -- tests/connectors/brainstormy-connector.test.js \
 - [ ] Loads enabled schedules from SQLite on startup
 - [ ] Registers valid cron tasks for each enabled schedule
 - [ ] Prevents concurrent execution of the same schedule
-- [ ] Executes tests via TestOrchestrator.runTests()
+- [ ] Executes tests via TestOrchestrator.run(appConfig, options)
 - [ ] Updates last_run tracking in database after each run
 - [ ] Sends start/completion/error notifications via WhatsApp
 - [ ] Supports notify_only_failures configuration
@@ -2959,7 +3137,7 @@ npm test -- tests/connectors/brainstormy-connector.test.js \
 - [ ] 25 BrainstormyConnector tests passing
 - [ ] 22 Scheduler tests passing
 - [ ] 14 ScheduleHandler tests passing
-- [ ] 10 ScheduledRunModel tests passing
+- [ ] 10 ScheduledRunRepository tests passing
 - [ ] Total: 71 tests passing
 - [ ] All mock factories functional
 
@@ -2984,7 +3162,9 @@ BRAINSTORMY_PROD_TEST_PASSWORD=<production test account password>
 
 ```bash
 npm install node-cron
-# Already installed: playwright, better-sqlite3, uuid, express, twilio
+# Already installed: playwright, better-sqlite3, express, twilio
+# Note: uuid is NOT needed — uses crypto.randomUUID() for ID generation,
+# consistent with BaseRepository._generateId() pattern
 ```
 
 ## Appendix C: Relationship to Existing Specs
@@ -2999,3 +3179,53 @@ npm install node-cron
 | Test scenarios (smoke, memory, bible) | qa-engine-05-implementation-plan.md §Week 2 |
 | Agent-feature mapping | qa-engine-01-overview-and-architecture.md §Agents |
 | Pre-deploy hook | qa-engine-05-implementation-plan.md §Week 4 Day 5 |
+
+---
+
+## Appendix D: Changes from v1.0 (Post-Evaluation Fixes)
+
+This section documents all changes made after Claude Code's feasibility evaluation of v1.0.
+
+### Critical Fixes (C1-C3)
+
+| ID | Issue | Fix Applied |
+|---|---|---|
+| **C1** | `orchestrator.runTests()` doesn't exist; actual API is `orchestrator.run(appConfig, options)` | Replaced all `runTests` calls with `run()`. Added `loadAppConfig` function to Scheduler constructor to load appConfig by ID before passing to orchestrator. Updated mock orchestrator, test descriptions, and validation checklist. |
+| **C2** | ConnectorFactory replacement would break `skipInitialize`, `CONNECTOR_REGISTRY`, `getRegisteredTypes()`, `ConnectorError` | Removed factory.js replacement entirely. Part 10 now documents that existing factory already registers BrainstormyConnector — no changes needed. |
+| **C3** | `uuid` package not in dependencies | Replaced `require('uuid')` with `crypto.randomUUID()`, consistent with `BaseRepository._generateId()` pattern. No new dependency needed. |
+
+### Moderate Fixes (M1-M7)
+
+| ID | Issue | Fix Applied |
+|---|---|---|
+| **M1** | app.config.json structural mismatch (nested environments, snake_case, wrong field names) | Rewrote config to match existing shape: `id` not `app_id`, `baseUrl` top-level, `connector.type: "ai-chat-app"`, auth under `connector.config.auth`, camelCase selectors/timeouts. Updated all connector methods (`getEnvironment()`, `getTimeout()`, `authenticate()`, `navigate()`) and all `getSelector()` calls to use camelCase keys. |
+| **M2** | ScheduledRunModel bypasses BaseRepository pattern | Rewritten as `ScheduledRunRepository extends BaseRepository` with `connection` wrapper. Registered in `createDatabase()` as `db.scheduledRuns`. Updated mock test-db to provide connection wrapper. |
+| **M3** | Missing database migration file | Added `core/database/migrations/002_scheduled_runs.sql` with proper migration file convention. Updated Step 11 to use `createDatabase()` which runs Migrator automatically. |
+| **M4** | `testRunModel.getRunsSince()` doesn't exist | Added implementation note with the SQL query that must be added to `TestRunRepository`. |
+| **M5** | BrainstormyConnector already exists (422 lines) | Added diff-merge warning: Part 4 now documents this as a merge target, not a replacement. Lists specific additions needed. |
+| **M6** | selectors.js used snake_case; existing config uses camelCase in `connector.config.selectors` | Converted all selector keys to camelCase. Added note clarifying selectors.js as defaults file with merge pattern. |
+| **M7** | WhatsApp ScheduleHandler needs routing through existing MessageParser → CommandHandler pipeline | Added integration notes with specific patterns to add to MessageParser and routing in CommandHandler. |
+
+### Minor Fixes (m1-m5)
+
+| ID | Issue | Fix Applied |
+|---|---|---|
+| **m1** | node-cron not in package.json | Already documented in Appendix B (no change needed). |
+| **m2** | setup-scheduler.sh used wrong DB initialization pattern | Rewrote to use `createDatabase()` and `db.scheduledRuns` repository. |
+| **m3** | References to nonexistent `scripts/migrate.js` | Removed all references; migrations run via `createDatabase()` → `Migrator.migrate()`. |
+| **m4** | `notifier.send(null, message)` — null recipient | Added `defaultRecipient` option to Scheduler constructor (falls back to `WHATSAPP_DEFAULT_RECIPIENT` env var). All `send()` calls now use `this.defaultRecipient`. |
+| **m5** | `setup_test_project` action missing from performAction | Already present in spec (was false positive in evaluation). |
+
+### Naming Convention Changes (throughout)
+
+| Old (v1.0) | New (v1.1) | Reason |
+|---|---|---|
+| `scheduledRunModel` | `scheduledRunRepo` | Follows BaseRepository pattern |
+| `testRunModel` | `testRunRepo` | Follows BaseRepository pattern |
+| `ScheduledRunModel` | `ScheduledRunRepository` | Extends BaseRepository |
+| `app_id` (config) | `id` | Matches existing config convention |
+| `password_env` | `passwordEnv` | camelCase consistency |
+| `clerk_email_password` | `email_password` | Matches existing auth type |
+| `ai_response` (timeout) | `aiResponse` | camelCase consistency |
+| `clerk_email_input` (selector) | `clerkEmailInput` | camelCase consistency |
+| All snake_case selectors | All camelCase selectors | Matches existing `connector.config.selectors` |
