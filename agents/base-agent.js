@@ -407,7 +407,8 @@ class BaseAgent {
         }
 
         case 'element_exists': {
-          const exists = await this.connector.exists(assertion.selector);
+          const resolved = this.connector.getSelector?.(assertion.selector) || assertion.selector;
+          const exists = await this.connector.exists(resolved);
           expected = `element "${assertion.selector}" exists`;
           actual = exists ? 'found' : 'not found';
           passed = exists;
@@ -415,9 +416,10 @@ class BaseAgent {
         }
 
         case 'element_text_contains': {
+          const resolved = this.connector.getSelector?.(assertion.selector) || assertion.selector;
           let text;
           try {
-            text = await this.connector.extractData(assertion.selector);
+            text = await this.connector.extractData(resolved);
           } catch (_) {
             text = null;
           }
