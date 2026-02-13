@@ -72,3 +72,20 @@
   - Added `auth.required: true` and `testProjectName: "QA Test Project"`
   - Verification: All 5 checks PASS (id, baseUrl, connector type, auth config, camelCase selectors)
 - **Deviations:** None — implemented verbatim from spec
+
+---
+
+## Step 6: Write connector tests
+
+- **Files modified:** `tests/connectors/brainstormy-connector.test.js`, `tests/helpers/mock-playwright.js`, `connectors/brainstormy/connector.js`
+- **Status:** done
+- **Changes:**
+  - Rewrote test file for new connector (was 978 lines for old connector, now 487 lines for new)
+  - Updated `createBrainstormyAppConfig()` in mock-playwright.js: camelCase selectors, new config shape with `connector.config.selectors`, environments use `url` (matching `getBaseURL()`)
+  - Fixed `getSelector()` in connector.js: added snake_case→camelCase fallback for backward compatibility with parent classes (AIAppConnector uses `chat_input`, we store as `chatInput`)
+  - 39 tests across 10 describe blocks: constructor (2), initialize (5), authenticate (5), performAction (8), createProject (4), createStory (3), createSession (3), generateStoryBible (4), performSearch (3), cleanup (2)
+- **Test count:** 39 tests passing (spec estimated 25)
+- **Regression check:** All 264 connector tests passing (5 test suites)
+- **Deviations:**
+  - Added snake_case→camelCase conversion in `getSelector()` so parent classes (AIAppConnector, GenericWebAppConnector) can still resolve selectors using their snake_case keys
+  - Test count 39 vs spec estimate of 25 — more thorough coverage of new methods

@@ -135,58 +135,96 @@ function createMockCitationElement(id, text) {
  * and BrainstormyConnector, plus url_patterns and extended timeouts.
  */
 function createBrainstormyAppConfig(overrides = {}) {
-  return createMockAppConfig({
-    app_id: 'brainstormy',
+  return {
+    id: 'brainstormy',
     name: 'Brainstormy',
-    connector: { type: 'brainstormy', base: 'ai-chat-app' },
-    config: {
-      auth_indicator: '[data-testid="user-menu"]',
-      ready_indicator: '[data-testid="app-loaded"]',
-      selectors: {
-        // Login (from GenericWebAppConnector config)
-        login_email: '[name="email"]',
-        login_password: '[name="password"]',
-        login_submit: '[type="submit"]',
-        logout: '[data-testid="logout-button"]',
-
-        // Chat (from AIAppConnector config)
-        chat_input: '[data-testid="chat-input"]',
-        chat_send: '[data-testid="send-button"]',
-        ai_message: '[data-testid="ai-message"]',
-        generating_indicator: '[data-testid="generating"]',
-
-        // Brainstormy-specific
-        new_project_button: '[data-testid="new-project-button"]',
-        project_name_input: '[data-testid="project-name-input"]',
-        create_project_submit: '[data-testid="create-project-button"]',
-        new_story_button: '[data-testid="new-story-button"]',
-        story_name_input: '[data-testid="story-name-input"]',
-        story_vertical_select: '[data-testid="story-vertical-select"]',
-        create_story_submit: '[data-testid="create-story-button"]',
-        new_session_button: '[data-testid="new-session-button"]',
-        session_type_select: '[data-testid="session-type-select"]',
-        create_session_submit: '[data-testid="create-session-button"]',
-        story_bible_button: '[data-testid="story-bible-button"]',
-        bible_template_prefix: '[data-testid="template-',
-        generate_bible_button: '[data-testid="generate-bible-button"]',
-        bible_content: '[data-testid="bible-content"]',
-        session_summary_button: '[data-testid="session-summary-button"]',
-        summary_content: '[data-testid="summary-content"]',
-        citation_element: '[data-citation-id]'
-      },
-      url_patterns: {
-        project_id: 'projects\\/([a-zA-Z0-9-]+)',
-        story_id: 'stories\\/([a-zA-Z0-9-]+)',
-        session_id: 'sessions\\/([a-zA-Z0-9-]+)'
-      },
-      timeouts: {
-        ai_response: 60000,
-        bible_generation: 120000,
-        navigation: 30000
+    type: 'ai-chat-app',
+    baseUrl: 'https://staging.brainstormy.app',
+    connector: {
+      type: 'brainstormy',
+      config: {
+        auth: {
+          type: 'email_password',
+          required: true,
+          credentials: {
+            email: 'testbot@brainstormy.app',
+            passwordEnv: 'BRAINSTORMY_TEST_PASSWORD'
+          }
+        },
+        selectors: {
+          clerkEmailInput: 'input[name="identifier"]',
+          clerkPasswordInput: 'input[name="password"]',
+          clerkSubmitButton: 'button[type="submit"]',
+          userMenu: '[data-testid="user-menu"]',
+          logoutButton: '[data-testid="logout-button"]',
+          sidebarProjects: '[data-testid="sidebar-projects"]',
+          storySidebarItem: '[data-testid="story-nav-item"]',
+          newProjectButton: '[data-testid="new-project-button"]',
+          projectNameInput: '[data-testid="project-name-input"]',
+          createProjectSubmit: '[data-testid="create-project-button"]',
+          newStoryButton: '[data-testid="new-story-button"]',
+          storyNameInput: '[data-testid="story-name-input"]',
+          storyVerticalSelect: '[data-testid="story-vertical-select"]',
+          createStorySubmit: '[data-testid="create-story-button"]',
+          newSessionButton: '[data-testid="new-session-button"]',
+          sessionTypeSelect: '[data-testid="session-type-select"]',
+          createSessionSubmit: '[data-testid="create-session-button"]',
+          sessionList: '[data-testid="session-list"]',
+          sessionItem: '[data-testid="session-item"]',
+          endSessionButton: '[data-testid="end-session-button"]',
+          chatInput: '[data-testid="chat-input"]',
+          chatSend: '[data-testid="send-button"]',
+          aiMessage: '[data-testid="ai-message"]',
+          userMessage: '[data-testid="user-message"]',
+          generatingIndicator: '[data-testid="generating"]',
+          searchInput: '[data-testid="search-input"]',
+          searchSubmit: '[data-testid="search-submit"]',
+          searchResults: '[data-testid="search-results"]',
+          searchResultItem: '[data-testid="search-result-item"]',
+          bibleTab: '[data-testid="bible-tab"]',
+          bibleTemplateSelect: '[data-testid="bible-template-select"]',
+          bibleGenerateButton: '[data-testid="bible-generate"]',
+          bibleSection: '[data-testid="bible-section"]',
+          bibleGeneratingIndicator: '[data-testid="bible-generating"]',
+          reportTab: '[data-testid="report-tab"]',
+          reportTypeSelect: '[data-testid="report-type-select"]',
+          reportGenerateButton: '[data-testid="report-generate"]',
+          reportContent: '[data-testid="report-content"]',
+          reportCitation: '[data-citation-id]',
+          bookmarkButton: '[data-testid="bookmark-button"]',
+          bookmarkTitleInput: '[data-testid="bookmark-title-input"]',
+          bookmarkSaveButton: '[data-testid="bookmark-save"]',
+          bookmarksTab: '[data-testid="bookmarks-tab"]',
+          bookmarkItem: '[data-testid="bookmark-item"]',
+          sessionSummaryButton: '[data-testid="session-summary-button"]',
+          sessionSummaryContent: '[data-testid="session-summary"]',
+          readyIndicator: '[data-testid="app-loaded"]'
+        },
+        url_patterns: {
+          project_id: 'projects\\/([a-zA-Z0-9-]+)',
+          story_id: 'stories\\/([a-zA-Z0-9-]+)',
+          session_id: 'sessions\\/([a-zA-Z0-9-]+)'
+        },
+        timeouts: {
+          aiResponse: 60000,
+          bibleGeneration: 120000,
+          reportGeneration: 90000,
+          navigation: 30000,
+          search: 15000,
+          sessionSummary: 60000,
+          clerkAuth: 30000
+        },
+        testProjectName: 'QA Test Project'
+      }
+    },
+    environments: {
+      staging: {
+        url: 'https://staging.brainstormy.app',
+        auth: { credentials: { passwordEnv: 'BRAINSTORMY_TEST_PASSWORD' } }
       }
     },
     ...overrides
-  });
+  };
 }
 
 /**

@@ -4,9 +4,7 @@ const BrainstormyConnector = require('../../connectors/brainstormy/connector');
 const AIAppConnector = require('../../connectors/ai-chat-app/connector');
 const GenericWebAppConnector = require('../../connectors/generic-web-app/connector');
 const BaseConnector = require('../../connectors/base-connector');
-const {
-  ConnectorError
-} = require('../../connectors/errors');
+const { ConnectorError } = require('../../connectors/errors');
 const {
   createMockPage,
   createMockElement,
@@ -25,12 +23,12 @@ function createMockEvidence(overrides = {}) {
     getNetworkRequests: jest.fn().mockResolvedValue([]),
     collectAll: jest.fn().mockResolvedValue({
       stepName: 'test_step',
-      timestamp: '2026-02-11T00:00:00Z',
+      timestamp: '2026-02-13T00:00:00Z',
       screenshots: { full: '/evidence/full.png', viewport: '/evidence/viewport.png' },
       consoleLogs: [],
       networkRequests: [],
-      url: 'https://staging.test-app.com',
-      pageTitle: 'Test',
+      url: 'https://staging.brainstormy.app',
+      pageTitle: 'Brainstormy',
       viewport: { width: 1280, height: 720 },
       summary: { totalLogs: 0, errorLogs: 0, warnLogs: 0, totalRequests: 0, failedRequests: 0 }
     }),
@@ -47,9 +45,9 @@ function createConnector(appOverrides = {}, pageOverrides = {}, evidenceOverride
 }
 
 /**
- * Set up mock page URL to contain an entity ID for extraction.
+ * Set mock page URL (used by _extractIdFromUrl via getCurrentURL).
  */
-function mockUrlWithId(page, url) {
+function mockUrl(page, url) {
   page.url.mockReturnValue(url);
 }
 
@@ -59,920 +57,431 @@ function mockUrlWithId(page, url) {
 
 describe('BrainstormyConnector', () => {
 
-  // ===================================================================
-  // Constructor / Instantiation
-  // ===================================================================
-
-  describe('Constructor / Instantiation', () => {
-    test('can be instantiated directly', () => {
+  // -----------------------------------------------------------------
+  // constructor
+  // -----------------------------------------------------------------
+  describe('constructor', () => {
+    test('initializes with null project/story/session IDs', () => {
       const { connector } = createConnector();
-      expect(connector).toBeInstanceOf(BrainstormyConnector);
+      expect(connector.currentProjectId).toBeNull();
+      expect(connector.currentStoryId).toBeNull();
+      expect(connector.currentSessionId).toBeNull();
     });
 
-    test('inherits from AIAppConnector', () => {
+    test('sets up empty createdEntities array', () => {
       const { connector } = createConnector();
-      expect(connector).toBeInstanceOf(AIAppConnector);
-    });
-
-    test('inherits from GenericWebAppConnector', () => {
-      const { connector } = createConnector();
-      expect(connector).toBeInstanceOf(GenericWebAppConnector);
-    });
-
-    test('inherits from BaseConnector', () => {
-      const { connector } = createConnector();
-      expect(connector).toBeInstanceOf(BaseConnector);
+      expect(connector.createdEntities).toEqual([]);
+      expect(Array.isArray(connector.createdEntities)).toBe(true);
     });
   });
 
-  // ===================================================================
-  // performAction — Brainstormy action dispatch
-  // ===================================================================
+  // -----------------------------------------------------------------
+  // initialize()
+  // -----------------------------------------------------------------
+  describe('initialize()', () => {
+    test('navigates to staging URL', async () => {
+      const { connector, page } = createConnector();
+      jest.spyOn(connector, 'authenticate').mockResolvedValue(true);
+      await connector.initialize();
+      expect(page.goto).toHaveBeenCalledWith(
+        'https://staging.brainstormy.app',
+        { waitUntil: 'networkidle' }
+      );
+    });
 
-  describe('performAction() — Brainstormy action dispatch', () => {
-    test('dispatches create_project to createProject()', async () => {
+    test('calls authenticate when auth required', async () => {
       const { connector } = createConnector();
-      const spy = jest.spyOn(connector, 'createProject').mockResolvedValue({ id: 'p1', name: 'Test', timestamp: 'ts' });
+      const authSpy = jest.spyOn(connector, 'authenticate').mockResolvedValue(true);
+      await connector.initialize();
+      expect(authSpy).toHaveBeenCalled();
+    });
 
+    test('throws on auth failure', async () => {
+      const { connector } = createConnector();
+      jest.spyOn(connector, 'authenticate').mockResolvedValue(false);
+      await expect(connector.initialize()).rejects.toThrow(ConnectorError);
+      await expect(connector.initialize()).rejects.toThrow('Authentication failed');
+    });
+
+    test('collects evidence for initial load and auth', async () => {
+      const { connector, evidence } = createConnector();
+      jest.spyOn(connector, 'authenticate').mockResolvedValue(true);
+      await connector.initialize();
+      // collectAll is called as (page, stepName) — step name at index 1
+      const stepNames = evidence.collectAll.mock.calls.map(c => c[1]);
+      expect(stepNames).toContain('initial_load');
+      expect(stepNames).toContain('authenticated_ready');
+    });
+
+    test('waits for app ready indicator', async () => {
+      const { connector, page } = createConnector();
+      jest.spyOn(connector, 'authenticate').mockResolvedValue(true);
+      await connector.initialize();
+      // waitForAppReady → waitFor → page.waitForSelector
+      expect(page.waitForSelector).toHaveBeenCalledWith(
+        '[data-testid="app-loaded"]',
+        expect.objectContaining({ timeout: expect.any(Number) })
+      );
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // authenticate()
+  // -----------------------------------------------------------------
+  describe('authenticate()', () => {
+    beforeEach(() => {
+      process.env.BRAINSTORMY_TEST_PASSWORD = 'test-secret-pw';
+    });
+
+    afterEach(() => {
+      delete process.env.BRAINSTORMY_TEST_PASSWORD;
+    });
+
+    test('fills Clerk email input with configured email', async () => {
+      const { connector, page } = createConnector();
+      await connector.authenticate();
+      expect(page.fill).toHaveBeenCalledWith(
+        'input[name="identifier"]',
+        'testbot@brainstormy.app'
+      );
+    });
+
+    test('fills Clerk password input from env var', async () => {
+      const { connector, page } = createConnector();
+      await connector.authenticate();
+      expect(page.fill).toHaveBeenCalledWith(
+        'input[name="password"]',
+        'test-secret-pw'
+      );
+    });
+
+    test('clicks submit and waits for user menu', async () => {
+      const { connector, page } = createConnector();
+      await connector.authenticate();
+      expect(page.click).toHaveBeenCalledWith('button[type="submit"]');
+      expect(page.waitForSelector).toHaveBeenCalledWith(
+        '[data-testid="user-menu"]',
+        expect.objectContaining({ timeout: expect.any(Number) })
+      );
+    });
+
+    test('returns false on timeout', async () => {
+      const { connector, page } = createConnector();
+      page.waitForSelector.mockRejectedValueOnce(new Error('Timeout'));
+      const result = await connector.authenticate();
+      expect(result).toBe(false);
+    });
+
+    test('collects evidence on failure', async () => {
+      const { connector, page, evidence } = createConnector();
+      page.waitForSelector.mockRejectedValueOnce(new Error('Timeout'));
+      await connector.authenticate();
+      const stepNames = evidence.collectAll.mock.calls.map(c => c[1]);
+      expect(stepNames).toContain('auth_failed');
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // performAction()
+  // -----------------------------------------------------------------
+  describe('performAction()', () => {
+    test('routes create_project to createProject', async () => {
+      const { connector } = createConnector();
+      const spy = jest.spyOn(connector, 'createProject').mockResolvedValue({ id: 'p1' });
       await connector.performAction('create_project', { name: 'Test' });
       expect(spy).toHaveBeenCalledWith('Test');
     });
 
-    test('dispatches create_story to createStory()', async () => {
+    test('routes create_story to createStory', async () => {
       const { connector } = createConnector();
-      const spy = jest.spyOn(connector, 'createStory').mockResolvedValue({ id: 's1', name: 'Story', vertical: 'novel', timestamp: 'ts' });
-
-      await connector.performAction('create_story', { name: 'Story', vertical: 'novel' });
-      expect(spy).toHaveBeenCalledWith('Story', 'novel');
+      const spy = jest.spyOn(connector, 'createStory').mockResolvedValue({ id: 's1' });
+      await connector.performAction('create_story', { name: 'Ch1', vertical: 'novel' });
+      expect(spy).toHaveBeenCalledWith('Ch1', 'novel');
     });
 
-    test('dispatches create_session to createSession()', async () => {
+    test('routes create_session to createSession', async () => {
       const { connector } = createConnector();
-      const spy = jest.spyOn(connector, 'createSession').mockResolvedValue({ id: 'se1', type: 'explore', timestamp: 'ts' });
-
-      await connector.performAction('create_session', { type: 'explore' });
-      expect(spy).toHaveBeenCalledWith('explore');
+      const spy = jest.spyOn(connector, 'createSession').mockResolvedValue({ id: 'se1' });
+      await connector.performAction('create_session', { type: 'explore', name: 'QA' });
+      expect(spy).toHaveBeenCalledWith('explore', 'QA');
     });
 
-    test('dispatches navigate_to_story to navigateToStory()', async () => {
+    test('routes generate_bible to generateStoryBible', async () => {
       const { connector } = createConnector();
-      const spy = jest.spyOn(connector, 'navigateToStory').mockResolvedValue(undefined);
-
-      await connector.performAction('navigate_to_story', { story_id: 'abc-123' });
-      expect(spy).toHaveBeenCalledWith('abc-123');
-    });
-
-    test('dispatches generate_bible to generateStoryBible()', async () => {
-      const { connector } = createConnector();
-      const spy = jest.spyOn(connector, 'generateStoryBible').mockResolvedValue({ template: 'standard', content: '', timestamp: 'ts' });
-
+      const spy = jest.spyOn(connector, 'generateStoryBible').mockResolvedValue({ sections: {} });
       await connector.performAction('generate_bible', { template: 'standard' });
       expect(spy).toHaveBeenCalledWith('standard');
     });
 
-    test('dispatches get_session_summary to getSessionSummary()', async () => {
+    test('routes search to performSearch', async () => {
       const { connector } = createConnector();
-      const spy = jest.spyOn(connector, 'getSessionSummary').mockResolvedValue({ session_id: 'se1', summary: '', timestamp: 'ts' });
-
-      await connector.performAction('get_session_summary', { session_id: 'se1' });
-      expect(spy).toHaveBeenCalledWith('se1');
+      const spy = jest.spyOn(connector, 'performSearch').mockResolvedValue({ results: [] });
+      await connector.performAction('search', { query: 'detective' });
+      expect(spy).toHaveBeenCalledWith('detective');
     });
 
-    test('delegates send_message to super (AIAppConnector)', async () => {
-      const { connector } = createConnector();
-      const spy = jest.spyOn(connector, 'sendMessage').mockResolvedValue({ text: 'hi', timestamp: 'ts', messageIndex: 0 });
-
-      await connector.performAction('send_message', { text: 'hi' });
-      expect(spy).toHaveBeenCalledWith('hi');
-    });
-
-    test('delegates click to super (GenericWebAppConnector)', async () => {
+    test('routes send_message to parent AIAppConnector', async () => {
       const { connector, page } = createConnector();
-
-      await connector.performAction('click', { selector: '#btn' });
-      expect(page.click).toHaveBeenCalledWith('#btn');
+      // send_message is not in brainstormyActions, so it goes to super.performAction()
+      // which eventually calls sendMessage()
+      await connector.performAction('send_message', { text: 'hello' });
+      expect(page.fill).toHaveBeenCalledWith('[data-testid="chat-input"]', 'hello');
     });
 
-    test('delegates unknown action to super chain', async () => {
+    test('routes unknown action to parent chain', async () => {
       const { connector } = createConnector();
-
-      await expect(connector.performAction('unknown_action')).rejects.toThrow('not supported');
+      // Unknown actions go to super.performAction which goes to GenericWebAppConnector
+      // which throws for truly unknown actions
+      await expect(connector.performAction('totally_unknown_action'))
+        .rejects.toThrow();
     });
 
-    test('captures before evidence for Brainstormy actions', async () => {
+    test('collects before/after evidence for every action', async () => {
       const { connector, evidence } = createConnector();
-      jest.spyOn(connector, 'createProject').mockResolvedValue({ id: 'p1', name: 'Test', timestamp: 'ts' });
-
+      jest.spyOn(connector, 'createProject').mockResolvedValue({ id: 'p1' });
       await connector.performAction('create_project', { name: 'Test' });
-
-      const calls = evidence.collectAll.mock.calls;
-      expect(calls[0][1]).toMatch(/^before_create_project_/);
-    });
-
-    test('captures after evidence on success', async () => {
-      const { connector, evidence } = createConnector();
-      jest.spyOn(connector, 'createProject').mockResolvedValue({ id: 'p1', name: 'Test', timestamp: 'ts' });
-
-      await connector.performAction('create_project', { name: 'Test' });
-
-      const calls = evidence.collectAll.mock.calls;
-      const lastCall = calls[calls.length - 1];
-      expect(lastCall[1]).toMatch(/^after_create_project_/);
-    });
-
-    test('captures failure evidence on error', async () => {
-      const { connector, evidence } = createConnector();
-      jest.spyOn(connector, 'createProject').mockRejectedValue(new ConnectorError('fail'));
-
-      await expect(connector.performAction('create_project', { name: 'Test' })).rejects.toThrow('fail');
-
-      const calls = evidence.collectAll.mock.calls;
-      const failCall = calls.find(c => c[1].startsWith('failed_'));
-      expect(failCall).toBeDefined();
-      expect(failCall[1]).toMatch(/^failed_create_project_/);
+      const stepNames = evidence.collectAll.mock.calls.map(c => c[1]);
+      const beforeCalls = stepNames.filter(s => s.startsWith('before_create_project'));
+      const afterCalls = stepNames.filter(s => s.startsWith('after_create_project'));
+      expect(beforeCalls.length).toBeGreaterThanOrEqual(1);
+      expect(afterCalls.length).toBeGreaterThanOrEqual(1);
     });
   });
 
-  // ===================================================================
-  // createProject
-  // ===================================================================
-
+  // -----------------------------------------------------------------
+  // createProject()
+  // -----------------------------------------------------------------
   describe('createProject()', () => {
-    test('navigates to /projects', async () => {
+    test('navigates to /projects, clicks new, fills name', async () => {
       const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/abc-12345678');
-
-      await connector.createProject('Test Project');
-
-      expect(page.goto).toHaveBeenCalledWith('https://staging.test-app.com/projects');
-    });
-
-    test('clicks new_project_button selector', async () => {
-      const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/abc-12345678');
-
-      await connector.createProject('Test Project');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="new-project-button"]');
-    });
-
-    test('types name into project_name_input selector', async () => {
-      const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/abc-12345678');
-
+      mockUrl(page, 'https://staging.brainstormy.app/projects/abc-123');
       await connector.createProject('My Novel');
-
+      // navigate calls page.goto with base URL + path
+      expect(page.goto).toHaveBeenCalledWith('https://staging.brainstormy.app/projects');
+      expect(page.click).toHaveBeenCalledWith('[data-testid="new-project-button"]');
       expect(page.fill).toHaveBeenCalledWith('[data-testid="project-name-input"]', 'My Novel');
-    });
-
-    test('clicks create_project_submit selector', async () => {
-      const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/abc-12345678');
-
-      await connector.createProject('Test');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="create-project-button"]');
-    });
-
-    test('waits for navigation after submit', async () => {
-      const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/abc-12345678');
-
-      await connector.createProject('Test');
-
-      // waitForNavigation calls waitForLoadState('networkidle')
-      expect(page.waitForLoadState).toHaveBeenCalled();
     });
 
     test('extracts project ID from URL', async () => {
       const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/proj-uuid-1234');
-
+      mockUrl(page, 'https://staging.brainstormy.app/projects/proj-uuid-42');
       const result = await connector.createProject('Test');
-
-      expect(result.id).toBe('proj-uuid-1234');
+      expect(result.id).toBe('proj-uuid-42');
     });
 
-    test('stores current_project_id in state', async () => {
+    test('stores project ID in state', async () => {
       const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/proj-uuid-1234');
-
+      mockUrl(page, 'https://staging.brainstormy.app/projects/proj-state-1');
       await connector.createProject('Test');
-
-      expect(connector.getState('current_project_id')).toBe('proj-uuid-1234');
+      expect(connector.currentProjectId).toBe('proj-state-1');
+      expect(connector.getState('current_project_id')).toBe('proj-state-1');
     });
 
-    test('returns id, name, and timestamp', async () => {
+    test('tracks entity for cleanup', async () => {
       const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/proj-uuid-1234');
-
-      const result = await connector.createProject('My Project');
-
-      expect(result.id).toBe('proj-uuid-1234');
-      expect(result.name).toBe('My Project');
-      expect(result.timestamp).toBeDefined();
-    });
-
-    test('throws ConnectorError when ID cannot be extracted', async () => {
-      const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://staging.test-app.com/dashboard');
-
-      await expect(connector.createProject('Test')).rejects.toThrow(ConnectorError);
-      await expect(connector.createProject('Test')).rejects.toThrow('Failed to extract project ID');
+      mockUrl(page, 'https://staging.brainstormy.app/projects/proj-cleanup');
+      await connector.createProject('Cleanup Test');
+      expect(connector.createdEntities).toContainEqual(
+        expect.objectContaining({ type: 'project', id: 'proj-cleanup', name: 'Cleanup Test' })
+      );
     });
   });
 
-  // ===================================================================
-  // createStory
-  // ===================================================================
-
+  // -----------------------------------------------------------------
+  // createStory()
+  // -----------------------------------------------------------------
   describe('createStory()', () => {
-    test('requires current_project_id in state', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/projects/proj-1/stories/story-uuid');
-
-      const result = await connector.createStory('Chapter 1', 'novel');
-      expect(result.id).toBe('story-uuid');
-    });
-
-    test('throws ConnectorError when no current project', async () => {
+    test('throws if no project selected', async () => {
       const { connector } = createConnector();
-
-      await expect(connector.createStory('Story', 'novel')).rejects.toThrow(ConnectorError);
-      await expect(connector.createStory('Story', 'novel')).rejects.toThrow('No current project');
+      await expect(connector.createStory('My Story'))
+        .rejects.toThrow('No current project');
     });
 
-    test('clicks new_story_button selector', async () => {
+    test('fills story name and vertical', async () => {
       const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/stories/story-uuid');
-
-      await connector.createStory('Chapter 1', 'novel');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="new-story-button"]');
-    });
-
-    test('types name into story_name_input selector', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/stories/story-uuid');
-
-      await connector.createStory('My Story', 'novel');
-
-      expect(page.fill).toHaveBeenCalledWith('[data-testid="story-name-input"]', 'My Story');
-    });
-
-    test('selects vertical in story_vertical_select', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/stories/story-uuid');
-
-      await connector.createStory('My Story', 'screenplay');
-
-      expect(page.selectOption).toHaveBeenCalledWith('[data-testid="story-vertical-select"]', 'screenplay');
-    });
-
-    test('clicks create_story_submit selector', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/stories/story-uuid');
-
-      await connector.createStory('My Story', 'novel');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="create-story-button"]');
+      connector.currentProjectId = 'proj-1';
+      mockUrl(page, 'https://staging.brainstormy.app/stories/story-1');
+      // exists() calls page.$() — return truthy so vertical select is found
+      page.$.mockResolvedValue(createMockElement());
+      await connector.createStory('Chapter 1', 'screenplay');
+      expect(page.fill).toHaveBeenCalledWith('[data-testid="story-name-input"]', 'Chapter 1');
+      expect(page.selectOption).toHaveBeenCalledWith(
+        '[data-testid="story-vertical-select"]',
+        'screenplay'
+      );
     });
 
     test('extracts story ID from URL', async () => {
       const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/stories/story-abc-789');
-
-      const result = await connector.createStory('My Story', 'novel');
-
-      expect(result.id).toBe('story-abc-789');
-    });
-
-    test('stores current_story_id in state', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/stories/story-abc-789');
-
-      await connector.createStory('My Story', 'novel');
-
-      expect(connector.getState('current_story_id')).toBe('story-abc-789');
-    });
-
-    test('returns id, name, vertical, and timestamp', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_project_id', 'proj-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/stories/story-uuid');
-
-      const result = await connector.createStory('My Story', 'novel');
-
-      expect(result.id).toBe('story-uuid');
-      expect(result.name).toBe('My Story');
-      expect(result.vertical).toBe('novel');
-      expect(result.timestamp).toBeDefined();
+      connector.currentProjectId = 'proj-1';
+      mockUrl(page, 'https://staging.brainstormy.app/stories/story-uuid-7');
+      const result = await connector.createStory('Test Story');
+      expect(result.id).toBe('story-uuid-7');
+      expect(connector.currentStoryId).toBe('story-uuid-7');
     });
   });
 
-  // ===================================================================
-  // createSession
-  // ===================================================================
-
+  // -----------------------------------------------------------------
+  // createSession()
+  // -----------------------------------------------------------------
   describe('createSession()', () => {
-    test('requires current_story_id in state', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-uuid');
-      page.$.mockResolvedValue(createMockElement());
-
-      const result = await connector.createSession('explore');
-      expect(result.id).toBe('sess-uuid');
-    });
-
-    test('throws ConnectorError when no current story', async () => {
+    test('throws if no story selected', async () => {
       const { connector } = createConnector();
-
-      await expect(connector.createSession('explore')).rejects.toThrow(ConnectorError);
-      await expect(connector.createSession('explore')).rejects.toThrow('No current story');
+      await expect(connector.createSession('explore'))
+        .rejects.toThrow('No current story');
     });
 
-    test('clicks new_session_button selector', async () => {
+    test('selects session type', async () => {
       const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-uuid');
+      connector.currentStoryId = 'story-1';
+      mockUrl(page, 'https://staging.brainstormy.app/sessions/sess-1');
       page.$.mockResolvedValue(createMockElement());
-
-      await connector.createSession('explore');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="new-session-button"]');
-    });
-
-    test('selects type when provided and selector exists', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-uuid');
-      page.$.mockResolvedValue(createMockElement());
-
-      await connector.createSession('explore');
-
-      expect(page.selectOption).toHaveBeenCalledWith('[data-testid="session-type-select"]', 'explore');
-    });
-
-    test('skips type selection when not provided', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-uuid');
-      page.$.mockResolvedValue(createMockElement());
-
-      await connector.createSession();
-
-      expect(page.selectOption).not.toHaveBeenCalledWith(
+      await connector.createSession('brainstorm');
+      expect(page.selectOption).toHaveBeenCalledWith(
         '[data-testid="session-type-select"]',
-        expect.anything()
+        'brainstorm'
       );
-    });
-
-    test('clicks create_session_submit when it exists', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-uuid');
-      // exists() calls page.$() — return element so submit button "exists"
-      page.$.mockResolvedValue(createMockElement());
-
-      await connector.createSession('explore');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="create-session-button"]');
-    });
-
-    test('skips submit click when button not in DOM', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-uuid');
-      // exists() calls page.$() — return null so button doesn't exist
-      page.$.mockResolvedValue(null);
-
-      await connector.createSession('explore');
-
-      // Click is still called for new_session_button, but NOT for create_session_submit
-      const clickCalls = page.click.mock.calls.map(c => c[0]);
-      expect(clickCalls).toContain('[data-testid="new-session-button"]');
-      expect(clickCalls).not.toContain('[data-testid="create-session-button"]');
     });
 
     test('extracts session ID from URL', async () => {
       const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-abc-123');
+      connector.currentStoryId = 'story-1';
+      mockUrl(page, 'https://staging.brainstormy.app/sessions/sess-uuid-3');
       page.$.mockResolvedValue(createMockElement());
-
-      const result = await connector.createSession();
-
-      expect(result.id).toBe('sess-abc-123');
-    });
-
-    test('stores current_session_id in state', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-abc-123');
-      page.$.mockResolvedValue(createMockElement());
-
-      await connector.createSession();
-
-      expect(connector.getState('current_session_id')).toBe('sess-abc-123');
-    });
-
-    test('returns id, type, and timestamp', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      mockUrlWithId(page, 'https://staging.test-app.com/sessions/sess-uuid');
-      page.$.mockResolvedValue(createMockElement());
-
-      const result = await connector.createSession('develop');
-
-      expect(result.id).toBe('sess-uuid');
-      expect(result.type).toBe('develop');
-      expect(result.timestamp).toBeDefined();
+      const result = await connector.createSession('explore');
+      expect(result.id).toBe('sess-uuid-3');
+      expect(connector.currentSessionId).toBe('sess-uuid-3');
     });
   });
 
-  // ===================================================================
-  // navigateToStory
-  // ===================================================================
-
-  describe('navigateToStory()', () => {
-    test('navigates to /stories/{storyId}', async () => {
-      const { connector, page } = createConnector();
-
-      await connector.navigateToStory('story-uuid-456');
-
-      expect(page.goto).toHaveBeenCalledWith('https://staging.test-app.com/stories/story-uuid-456');
-    });
-
-    test('stores storyId in current_story_id state', async () => {
-      const { connector } = createConnector();
-
-      await connector.navigateToStory('story-uuid-456');
-
-      expect(connector.getState('current_story_id')).toBe('story-uuid-456');
-    });
-  });
-
-  // ===================================================================
-  // generateStoryBible
-  // ===================================================================
-
+  // -----------------------------------------------------------------
+  // generateStoryBible()
+  // -----------------------------------------------------------------
   describe('generateStoryBible()', () => {
-    test('requires current_story_id in state', async () => {
-      const { connector } = createConnector();
-
-      await expect(connector.generateStoryBible()).rejects.toThrow(ConnectorError);
-      await expect(connector.generateStoryBible()).rejects.toThrow('No current story');
-    });
-
-    test('clicks story_bible_button selector', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(createMockElement({ text: 'Bible content here' }));
-
-      await connector.generateStoryBible();
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="story-bible-button"]');
-    });
-
-    test('clicks template selector using prefix + template key', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(createMockElement({ text: 'Content' }));
-
-      await connector.generateStoryBible('detailed');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="template-detailed"]');
-    });
-
-    test('clicks generate_bible_button selector', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(createMockElement({ text: 'Content' }));
-
-      await connector.generateStoryBible();
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="generate-bible-button"]');
-    });
-
-    test('waits for bible_content with bible_generation timeout', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(createMockElement({ text: 'Content' }));
-
-      await connector.generateStoryBible();
-
-      expect(page.waitForSelector).toHaveBeenCalledWith(
-        '[data-testid="bible-content"]',
-        { timeout: 120000 }
-      );
-    });
-
-    test('extracts content text from bible_content element', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(createMockElement({ text: 'The story bible content' }));
-
-      const result = await connector.generateStoryBible();
-
-      expect(result.content).toBe('The story bible content');
-    });
-
-    test('defaults to "standard" template', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(createMockElement({ text: 'Content' }));
-
-      const result = await connector.generateStoryBible();
-
-      expect(result.template).toBe('standard');
-      expect(page.click).toHaveBeenCalledWith('[data-testid="template-standard"]');
-    });
-
-    test('returns template, content, and timestamp', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(createMockElement({ text: 'Content' }));
-
-      const result = await connector.generateStoryBible('custom');
-
-      expect(result.template).toBe('custom');
-      expect(result.content).toBe('Content');
-      expect(result.timestamp).toBeDefined();
-    });
-
-    test('returns empty content when extractData returns null', async () => {
-      const { connector, page } = createConnector();
-      connector.setState('current_story_id', 'story-1');
-      page.$.mockResolvedValue(null);
-
-      const result = await connector.generateStoryBible();
-
-      expect(result.content).toBe('');
-    });
-  });
-
-  // ===================================================================
-  // getSessionSummary
-  // ===================================================================
-
-  describe('getSessionSummary()', () => {
-    test('navigates to /sessions/{sessionId}', async () => {
-      const { connector, page } = createConnector();
-      page.$.mockResolvedValue(createMockElement({ text: 'Summary text' }));
-
-      await connector.getSessionSummary('sess-uuid-789');
-
-      expect(page.goto).toHaveBeenCalledWith('https://staging.test-app.com/sessions/sess-uuid-789');
-    });
-
-    test('clicks session_summary_button selector', async () => {
-      const { connector, page } = createConnector();
-      page.$.mockResolvedValue(createMockElement({ text: 'Summary' }));
-
-      await connector.getSessionSummary('sess-1');
-
-      expect(page.click).toHaveBeenCalledWith('[data-testid="session-summary-button"]');
-    });
-
-    test('waits for summary_content element', async () => {
-      const { connector, page } = createConnector();
-      page.$.mockResolvedValue(createMockElement({ text: 'Summary' }));
-
-      await connector.getSessionSummary('sess-1');
-
-      expect(page.waitForSelector).toHaveBeenCalledWith(
-        '[data-testid="summary-content"]',
-        expect.any(Object)
-      );
-    });
-
-    test('extracts summary text', async () => {
-      const { connector, page } = createConnector();
-      page.$.mockResolvedValue(createMockElement({ text: 'The session summary text' }));
-
-      const result = await connector.getSessionSummary('sess-1');
-
-      expect(result.summary).toBe('The session summary text');
-    });
-
-    test('returns session_id, summary, and timestamp', async () => {
-      const { connector, page } = createConnector();
-      page.$.mockResolvedValue(createMockElement({ text: 'Summary here' }));
-
-      const result = await connector.getSessionSummary('sess-abc');
-
-      expect(result.session_id).toBe('sess-abc');
-      expect(result.summary).toBe('Summary here');
-      expect(result.timestamp).toBeDefined();
-    });
-
-    test('returns empty summary when extractData returns null', async () => {
-      const { connector, page } = createConnector();
-      page.$.mockResolvedValue(null);
-
-      const result = await connector.getSessionSummary('sess-1');
-
-      expect(result.summary).toBe('');
-    });
-  });
-
-  // ===================================================================
-  // waitForAIResponse — override
-  // ===================================================================
-
-  describe('waitForAIResponse() — override', () => {
-    function setupWaitForResponseMocks(page, responseText = 'AI response', citationElements = []) {
-      let callCount = 0;
-      page.$$.mockImplementation(async (selector) => {
-        if (selector === '[data-citation-id]') {
-          return citationElements;
+    function setupBibleMocks(page) {
+      page.$.mockResolvedValue(createMockElement()); // exists() truthy
+      page.$$.mockResolvedValue([
+        {
+          $eval: jest.fn()
+            .mockResolvedValueOnce('Characters')
+            .mockResolvedValueOnce('Main character details...')
+        },
+        {
+          $eval: jest.fn()
+            .mockResolvedValueOnce('World Building')
+            .mockResolvedValueOnce('Fantasy world with...')
         }
-        // ai_message selector
-        callCount++;
-        if (callCount <= 1) return [];
-        return [createMockElement({ text: responseText, html: `<p>${responseText}</p>` })];
-      });
-      page.$.mockResolvedValue(null); // generating_indicator not found
+      ]);
     }
 
-    test('calls super.waitForAIResponse()', async () => {
+    test('selects template and clicks generate', async () => {
       const { connector, page } = createConnector();
-      setupWaitForResponseMocks(page);
-
-      const result = await connector.waitForAIResponse();
-
-      expect(result.text).toBe('AI response');
+      connector.currentStoryId = 'story-1';
+      setupBibleMocks(page);
+      await connector.generateStoryBible('detailed');
+      expect(page.click).toHaveBeenCalledWith('[data-testid="bible-tab"]');
+      expect(page.click).toHaveBeenCalledWith('[data-testid="bible-generate"]');
     });
 
-    test('extracts citations after getting response', async () => {
+    test('waits for generation indicator to disappear', async () => {
       const { connector, page } = createConnector();
-      const citations = [
-        createMockCitationElement('cit-1', 'First citation'),
-        createMockCitationElement('cit-2', 'Second citation')
-      ];
-      setupWaitForResponseMocks(page, 'Response text', citations);
-
-      const result = await connector.waitForAIResponse();
-
-      expect(result.citations).toHaveLength(2);
-      expect(result.citations[0].id).toBe('cit-1');
-      expect(result.citations[0].text).toBe('First citation');
+      connector.currentStoryId = 'story-1';
+      setupBibleMocks(page);
+      await connector.generateStoryBible('standard');
+      expect(page.waitForSelector).toHaveBeenCalledWith(
+        '[data-testid="bible-generating"]',
+        expect.objectContaining({ state: 'hidden' })
+      );
     });
 
-    test('returns response with citations array appended', async () => {
+    test('extracts sections from page', async () => {
       const { connector, page } = createConnector();
-      setupWaitForResponseMocks(page, 'Some response');
-
-      const result = await connector.waitForAIResponse();
-
-      expect(result).toHaveProperty('text');
-      expect(result).toHaveProperty('html');
-      expect(result).toHaveProperty('timestamp');
-      expect(result).toHaveProperty('messageIndex');
-      expect(result).toHaveProperty('citations');
+      connector.currentStoryId = 'story-1';
+      setupBibleMocks(page);
+      const result = await connector.generateStoryBible('standard');
+      expect(result.sections).toHaveProperty('characters');
+      expect(result.sections).toHaveProperty('world_building');
     });
 
-    test('returns empty citations when no citation elements found', async () => {
+    test('returns section count', async () => {
       const { connector, page } = createConnector();
-      setupWaitForResponseMocks(page, 'Response', []);
-
-      const result = await connector.waitForAIResponse();
-
-      expect(result.citations).toEqual([]);
-    });
-
-    test('returns empty citations when extraction fails', async () => {
-      const { connector, page } = createConnector();
-      let callCount = 0;
-      page.$$.mockImplementation(async (selector) => {
-        if (selector === '[data-citation-id]') {
-          throw new Error('DOM error');
-        }
-        callCount++;
-        if (callCount <= 1) return [];
-        return [createMockElement({ text: 'Response', html: '<p>Response</p>' })];
-      });
-      page.$.mockResolvedValue(null);
-
-      const result = await connector.waitForAIResponse();
-
-      expect(result.citations).toEqual([]);
+      connector.currentStoryId = 'story-1';
+      setupBibleMocks(page);
+      const result = await connector.generateStoryBible('standard');
+      expect(result.section_count).toBe(2);
+      expect(result.template).toBe('standard');
     });
   });
 
-  // ===================================================================
-  // extractCitations
-  // ===================================================================
-
-  describe('extractCitations()', () => {
-    test('queries elements matching citation_element selector', async () => {
-      const { connector, page } = createConnector();
-      page.$$.mockResolvedValue([]);
-
-      await connector.extractCitations();
-
-      expect(page.$$).toHaveBeenCalledWith('[data-citation-id]');
-    });
-
-    test('extracts id from data-citation-id attribute', async () => {
-      const { connector, page } = createConnector();
-      page.$$.mockResolvedValue([createMockCitationElement('cit-42', 'Some text')]);
-
-      const result = await connector.extractCitations();
-
-      expect(result[0].id).toBe('cit-42');
-    });
-
-    test('extracts text via textContent', async () => {
-      const { connector, page } = createConnector();
-      page.$$.mockResolvedValue([createMockCitationElement('cit-1', 'Citation text here')]);
-
-      const result = await connector.extractCitations();
-
-      expect(result[0].text).toBe('Citation text here');
-    });
-
-    test('returns array of {id, text} objects', async () => {
-      const { connector, page } = createConnector();
+  // -----------------------------------------------------------------
+  // performSearch()
+  // -----------------------------------------------------------------
+  describe('performSearch()', () => {
+    function setupSearchMocks(page) {
+      page.$.mockResolvedValue(createMockElement()); // exists() truthy
       page.$$.mockResolvedValue([
-        createMockCitationElement('c1', 'First'),
-        createMockCitationElement('c2', 'Second'),
-        createMockCitationElement('c3', 'Third')
-      ]);
-
-      const result = await connector.extractCitations();
-
-      expect(result).toHaveLength(3);
-      expect(result).toEqual([
-        { id: 'c1', text: 'First' },
-        { id: 'c2', text: 'Second' },
-        { id: 'c3', text: 'Third' }
-      ]);
-    });
-
-    test('returns empty array when no citation selector configured', async () => {
-      const { connector } = createConnector({
-        config: {
-          selectors: {
-            // No citation_element configured
-            chat_input: '[data-testid="chat-input"]',
-            chat_send: '[data-testid="send-button"]'
-          },
-          timeouts: {}
+        {
+          textContent: jest.fn().mockResolvedValue('Found result 1'),
+          getAttribute: jest.fn().mockResolvedValue('message')
+        },
+        {
+          textContent: jest.fn().mockResolvedValue('Found result 2'),
+          getAttribute: jest.fn().mockResolvedValue('bible')
         }
-      });
+      ]);
+    }
 
-      const result = await connector.extractCitations();
-
-      expect(result).toEqual([]);
+    test('fills search input and submits', async () => {
+      const { connector, page } = createConnector();
+      setupSearchMocks(page);
+      await connector.performSearch('detective');
+      expect(page.fill).toHaveBeenCalledWith('[data-testid="search-input"]', 'detective');
+      expect(page.click).toHaveBeenCalledWith('[data-testid="search-submit"]');
     });
 
-    test('returns empty array when no citation elements found', async () => {
+    test('extracts result items', async () => {
       const { connector, page } = createConnector();
-      page.$$.mockResolvedValue([]);
-
-      const result = await connector.extractCitations();
-
-      expect(result).toEqual([]);
+      setupSearchMocks(page);
+      const result = await connector.performSearch('detective');
+      expect(result.results.length).toBe(2);
+      expect(result.results[0].text).toBe('Found result 1');
+      expect(result.results[1].source).toBe('bible');
     });
 
-    test('returns empty array on error (never throws)', async () => {
+    test('returns count', async () => {
       const { connector, page } = createConnector();
-      page.$$.mockRejectedValue(new Error('Page crashed'));
-
-      const result = await connector.extractCitations();
-
-      expect(result).toEqual([]);
+      setupSearchMocks(page);
+      const result = await connector.performSearch('detective');
+      expect(result.count).toBe(2);
+      expect(result.query).toBe('detective');
     });
   });
 
-  // ===================================================================
-  // _extractIdFromUrl
-  // ===================================================================
-
-  describe('_extractIdFromUrl()', () => {
-    test('uses url_patterns from config when available', async () => {
-      const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://app.com/projects/my-project-id');
-
-      const id = await connector._extractIdFromUrl('project_id');
-
-      expect(id).toBe('my-project-id');
-    });
-
-    test('falls back to generic UUID pattern when no config', async () => {
-      const { connector, page } = createConnector({
-        config: {
-          selectors: {},
-          timeouts: {}
-          // no url_patterns
-        }
-      });
-      mockUrlWithId(page, 'https://app.com/entities/a1b2c3d4-e5f6-7890-abcd-ef1234567890');
-
-      const id = await connector._extractIdFromUrl('project_id');
-
-      expect(id).toBe('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
-    });
-
-    test('returns null when pattern does not match', async () => {
-      const { connector, page } = createConnector();
-      mockUrlWithId(page, 'https://app.com/dashboard');
-
-      const id = await connector._extractIdFromUrl('project_id');
-
-      expect(id).toBeNull();
-    });
-
-    test('handles RegExp patterns', async () => {
-      const { connector, page } = createConnector({
-        config: {
-          selectors: {},
-          timeouts: {},
-          url_patterns: {
-            project_id: /projects\/([a-zA-Z0-9-]+)/
-          }
-        }
-      });
-      mockUrlWithId(page, 'https://app.com/projects/regex-matched-id');
-
-      const id = await connector._extractIdFromUrl('project_id');
-
-      expect(id).toBe('regex-matched-id');
-    });
-
-    test('handles string patterns (converted to RegExp)', async () => {
-      const { connector, page } = createConnector();
-      // Default config has string patterns
-      mockUrlWithId(page, 'https://app.com/stories/string-pattern-id');
-
-      const id = await connector._extractIdFromUrl('story_id');
-
-      expect(id).toBe('string-pattern-id');
-    });
-  });
-
-  // ===================================================================
-  // Inherited behavior (smoke tests)
-  // ===================================================================
-
-  describe('Inherited behavior (smoke tests)', () => {
-    test('sendMessage works through AIAppConnector', async () => {
-      const { connector, page } = createConnector();
-
-      const result = await connector.sendMessage('Hello from Brainstormy');
-
-      expect(result.text).toBe('Hello from Brainstormy');
-      expect(page.fill).toHaveBeenCalledWith('[data-testid="chat-input"]', 'Hello from Brainstormy');
-    });
-
-    test('validateMemory works through AIAppConnector', async () => {
-      const { connector, page } = createConnector();
-      // Set up response mocks for validateMemory flow
-      let callCount = 0;
-      page.$$.mockImplementation(async (selector) => {
-        if (selector === '[data-citation-id]') return [];
-        callCount++;
-        if (callCount <= 1) return [];
-        return [createMockElement({ text: 'Marcus is the character', html: '<p>Marcus</p>' })];
-      });
-      page.$.mockResolvedValue(null);
-
-      const result = await connector.validateMemory('Who is the character?', 'Marcus');
-
-      expect(result.found).toBe(true);
-    });
-
-    test('click/type work through GenericWebAppConnector', async () => {
-      const { connector, page } = createConnector();
-
-      await connector.click('#test-btn');
-      expect(page.click).toHaveBeenCalledWith('#test-btn');
-
-      await connector.type('#test-input', 'hello');
-      expect(page.fill).toHaveBeenCalledWith('#test-input', 'hello');
-    });
-
-    test('evidence collection delegates to EvidenceCollector', async () => {
-      const { connector, evidence } = createConnector();
-
-      await connector.collectEvidence('brainstormy_test');
-      expect(evidence.collectAll).toHaveBeenCalled();
-    });
-
-    test('getSelector reads from app config', () => {
+  // -----------------------------------------------------------------
+  // cleanup()
+  // -----------------------------------------------------------------
+  describe('cleanup()', () => {
+    test('logs created entities', async () => {
       const { connector } = createConnector();
+      connector.createdEntities = [{ type: 'project', id: 'p1', name: 'Test' }];
+      const logSpy = jest.spyOn(console, 'log').mockImplementation();
+      await connector.cleanup();
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Created entities'),
+        expect.stringContaining('p1')
+      );
+      logSpy.mockRestore();
+    });
 
-      expect(connector.getSelector('new_project_button')).toBe('[data-testid="new-project-button"]');
-      expect(connector.getSelector('citation_element')).toBe('[data-citation-id]');
+    test('calls parent cleanup (logout)', async () => {
+      const { connector } = createConnector();
+      const superCleanup = jest.spyOn(
+        Object.getPrototypeOf(BrainstormyConnector.prototype),
+        'cleanup'
+      ).mockResolvedValue();
+      await connector.cleanup();
+      expect(superCleanup).toHaveBeenCalled();
+      superCleanup.mockRestore();
     });
   });
 });

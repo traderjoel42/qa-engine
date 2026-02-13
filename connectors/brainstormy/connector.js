@@ -913,13 +913,22 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {string} CSS selector string
    */
   getSelector(key) {
-    // 1. Config selectors (highest priority — overridable per-deployment)
-    const configSelector = this.app.connector?.config?.selectors?.[key];
-    if (configSelector) return configSelector;
-
-    // 2. Default selectors from selectors.js (fallback)
+    const configSelectors = this.app.connector?.config?.selectors;
     const DEFAULT_SELECTORS = require('./selectors');
-    return DEFAULT_SELECTORS[key] || null;
+
+    // 1. Try key as-is (camelCase from our code, or snake_case from parent classes)
+    if (configSelectors?.[key]) return configSelectors[key];
+    if (DEFAULT_SELECTORS[key]) return DEFAULT_SELECTORS[key];
+
+    // 2. Convert snake_case → camelCase for backward compatibility with parent classes
+    // (AIAppConnector uses 'chat_input', we store as 'chatInput')
+    const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    if (camelKey !== key) {
+      if (configSelectors?.[camelKey]) return configSelectors[camelKey];
+      if (DEFAULT_SELECTORS[camelKey]) return DEFAULT_SELECTORS[camelKey];
+    }
+
+    return null;
   }
 
   /**
