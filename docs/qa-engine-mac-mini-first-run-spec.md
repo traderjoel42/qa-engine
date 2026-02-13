@@ -1,10 +1,11 @@
 # QA Engine: Mac Mini Environment Setup & First-Run Validation
 
-**Version:** 1.0  
+**Version:** 2.0  
 **Date:** February 13, 2026  
 **Phase:** 2, Task 1  
-**Prerequisite:** Phase 1 complete (83 tests passing, 1,840 total across 43 suites, zero regressions)  
-**Related:** qa-engine-01 through 05, brainstormy-connector-and-scheduling-spec
+**Prerequisite:** Phase 1 complete — run `npm test` on Mac Mini to confirm actual passing count  
+**Related:** qa-engine-01 through 05, brainstormy-connector-and-scheduling-spec  
+**Revision Note:** v2.0 incorporates all 22 findings from Claude Code's feasibility evaluation against the actual qa-engine codebase. Every path, env var name, config key, CLI flag, and script reference has been reconciled with the implementation.
 
 ---
 
@@ -30,104 +31,177 @@ Get a single successful smoke test run against the real Brainstormy staging envi
 
 **Decision:** Use `https://brainstormy-frontend-staging.onrender.com` as the staging URL.
 
-**Rationale:** The original QA Engine specs reference `staging.brainstormy.app` and test account `testbot@brainstormy.app`. Neither exists. The actual staging frontend is deployed on Render at the URL above, and the QA test account is `qa-automation@brainstormy.co` using Clerk email/password auth. The `app.config.json` must reflect reality from day one — running against a nonexistent URL would waste time debugging DNS failures that aren't bugs.
+**Rationale:** The original QA Engine design specs reference `staging.brainstormy.app` and test account `testbot@brainstormy.app`. Neither exists. The actual staging frontend is deployed on Render at the URL above, and the QA test account is `qa-automation@brainstormy.co` using Clerk email/password auth. The `app.config.json` must reflect reality from day one.
 
-**Impact:** Update `apps/brainstormy/app.config.json` environments block and all credential references.
+**Impact:** Update the `baseUrl` and `environments.staging.baseUrl` fields in `apps/brainstormy/app.config.json`, plus auth credential references.
 
 ### D2: Cold-Start-Aware Timeouts
 
-**Decision:** Set navigation timeout to 90 seconds, AI response timeout to 90 seconds, and add an explicit warm-up step before the first test.
+**Decision:** Increase the `navigation` timeout to 90 seconds in `app.config.json` and implement a `warmUp()` method in BrainstormyConnector that hits the staging URL before tests begin.
 
-**Rationale:** Render free/starter tier services spin down after inactivity. The first page load can take 30–60 seconds while the service container restarts. Standard 30-second Playwright timeouts will fail on cold starts, creating false negatives that undermine trust in the system before it's even proven. A dedicated warm-up request with generous timeout, followed by standard (but still padded) timeouts for actual tests, handles this cleanly.
+**Rationale:** Render free/starter tier services spin down after inactivity. The first page load can take 30–60 seconds while the service container restarts. The existing 30-second navigation timeout in `connector.config.timeouts.navigation` will fail on cold starts, creating false negatives that undermine trust in the system before it's even proven.
 
-**Impact:** The warm-up step is added to the connector's `initialize()` flow (or as a pre-test hook in the CLI). Timeouts in `app.config.json` are increased. After the first request warms the service, subsequent requests should respond within normal timeframes.
+**Implementation:** Add a `warmUp()` method to BrainstormyConnector (or BaseConnector) that performs an HTTP GET against the app's `baseUrl` with a 120-second timeout, called from `initialize()` before any browser navigation. This is a small code change (~15 lines) to an existing file. Also increase `connector.config.timeouts.navigation` from `30000` to `90000` in the app config.
 
-### D3: Minimal First Run — Healer Agent, Smoke Scenarios Only
+**Impact:** Requires a code change to the connector (see Step 4a). After the warm-up request wakes the service, subsequent requests should respond within normal timeframes.
 
-**Decision:** The first-run validation uses only the Healer agent with smoke test scenarios. No Sentinel, Librarian, or Quinn agents.
+### D3: Minimal First Run — Healer Agent, Smoke Mode Only
 
-**Rationale:** The goal is to prove the plumbing works: connector authenticates, browser actions execute, evidence is captured, results are stored. A single successful login-and-navigate smoke test proves all of that. Running memory persistence tests (Sentinel) or edge cases (Quinn) introduces variables that could obscure infrastructure problems. Debug one layer at a time.
+**Decision:** The first-run validation uses only the Healer agent in `smoke` mode. No Sentinel, Librarian, or Quinn agents.
 
-**Impact:** The CLI command for first run targets a single agent: `qa-engine test --app brainstormy --agent healer --scenario smoke-login`.
+**Rationale:** The goal is to prove the plumbing works: connector authenticates, browser actions execute, evidence is captured, results are stored. The existing smoke test scenarios in `apps/brainstormy/scenarios/smoke-tests.json` (IDs: `smoke-01-login`, `smoke-02-navigate-project`, etc.) are the right starting point. Running memory persistence tests (Sentinel) or edge cases (Quinn) introduces variables that could obscure infrastructure problems.
+
+**Impact:** The CLI command for first run: `node cli/index.js test --app brainstormy --agent healer --mode smoke`. Uses the existing `--mode` flag — no new CLI flags needed for scenario selection.
 
 ### D4: Skip Bug Detection and Auto-Fix for First Run
 
-**Decision:** Disable bug detection, Linear integration, and auto-fix for the first-run validation. If a test fails, it should report the failure with evidence but NOT attempt to create Linear issues or generate fixes.
+**Decision:** Add a `--skip-bug-detection` flag to the CLI `test` command. When set, the orchestrator still collects evidence on failure but does not invoke the Bug Detector, create Linear issues, or trigger approval workflows.
 
-**Rationale:** The first run will almost certainly encounter selector mismatches, timing issues, or unexpected UI states. These are setup calibration issues, not bugs. Routing them through bug detection would create noise in Linear and potentially trigger approval workflows before the system is proven. Once the smoke test passes reliably, bug detection can be enabled in a subsequent task.
+**Rationale:** The first run will almost certainly encounter selector mismatches, timing issues, or unexpected UI states. These are setup calibration issues, not bugs. Routing them through bug detection would create noise in Linear and potentially trigger approval workflows before the system is proven.
 
-**Impact:** Run with `--no-bug-detection` flag or equivalent config override. The Healer agent still collects evidence on failure — screenshots, console logs, network requests — but stops at "test failed with evidence" rather than entering the bug lifecycle.
+**Implementation:** This requires a small code change to `cli/commands/test.js` to accept the flag and pass it through to `TestOrchestrator.run()` options. The orchestrator already has conditional bug detection logic — this just adds a way to disable it from the CLI. Estimated: ~20 lines across 2 files.
+
+**Impact:** Requires a code change (see Step 4b).
 
 ### D5: WhatsApp Notification as Standalone Verification
 
-**Decision:** Test WhatsApp notification delivery as a separate manual step, not as part of the smoke test flow.
+**Decision:** Test WhatsApp notification delivery as a separate manual step using a standalone script, not as part of the smoke test flow and not via a CLI subcommand.
 
-**Rationale:** The smoke test validates browser automation + evidence + storage. WhatsApp validates Twilio credentials + message delivery. Coupling them means a Twilio misconfiguration could block proving that browser automation works. Test them independently, then combine in subsequent tasks.
+**Rationale:** The smoke test validates browser automation + evidence + storage. WhatsApp validates Twilio credentials + message delivery. Coupling them means a Twilio misconfiguration could block proving that browser automation works. The CLI currently has `test`, `status`, and `bugs` commands but no `notify` command — adding one is out of scope for this task. A standalone script is faster to create and serves the verification purpose.
 
-**Impact:** A dedicated CLI command or script sends a test notification: `qa-engine notify --test`. This sends a hardcoded "QA Engine is online" message to the configured recipient and confirms delivery.
+**Impact:** Create `scripts/verify-whatsapp.js` using the correct env var names from `core/config.js`.
 
-### D6: SQLite Database in Standard Location
+### D6: SQLite Database at Codebase-Standard Location
 
-**Decision:** Place the SQLite database at `<repo>/database/qa.db` with evidence storage at `<repo>/evidence/`.
+**Decision:** Use the database path defined in `core/config.js`: `./data/qa-engine.db` (configurable via `QA_ENGINE_DB_PATH` env var).
 
-**Rationale:** Matches the directory structure defined in the Phase 0 spec. Local filesystem storage is appropriate for Phase 1–2 (single machine, single app). No need for external database configuration.
+**Rationale:** The Phase 1 implementation chose `data/qa-engine.db` as the database location, not `database/qa.db` as the original design specs proposed. The migration system is built into the engine initialization via `createDatabase()` in `core/database/index.js` — there is no standalone `scripts/migrate.js`. Aligning with the actual codebase avoids confusion.
 
-**Impact:** The `scripts/migrate.js` command creates the database and applies the schema. Evidence directories are created on first test run.
+**Impact:** All SQLite commands in this spec use `data/qa-engine.db`. Database initialization happens automatically when the engine first runs, not via a manual migration script. The `data/` directory is created by the engine if it doesn't exist.
+
+### D7: App Config Loads from JSON Files, Not Database
+
+**Decision:** Do not insert app records into the SQLite `apps` table manually. The system loads app configuration from `apps/brainstormy/app.config.json` at runtime via `loadAppConfig()`.
+
+**Rationale:** The Phase 1 implementation uses JSON files as the source of truth for app configuration. The `apps` table in SQLite is populated or referenced by the engine at runtime, not pre-seeded. Creating a manual `INSERT` would bypass the app loader and could produce schema mismatches.
+
+**Impact:** Step 5 from v1.0 (manual database initialization and app record insertion) is removed. The database is initialized automatically on first engine run.
+
+---
+
+## Code Changes Required Before First Run
+
+The evaluation identified two small capabilities that need to be added to the codebase before the first-run steps can execute. These are surgical additions, not architectural changes.
+
+### Change A: Warm-Up Method in Connector
+
+**File to modify:** `connectors/brainstormy/connector.js` (or `connectors/base-connector.js` if preferred)
+
+**What:** Add a `warmUp()` method that performs an HTTP GET against the app's base URL to wake up Render services before browser automation begins. Call it from `initialize()`.
+
+```javascript
+/**
+ * Wake up the target service if it's been idle (Render cold start).
+ * Performs a plain HTTP GET with generous timeout before browser nav.
+ */
+async warmUp() {
+  const url = this.app.baseUrl || this.app.environments?.staging?.baseUrl;
+  const timeout = this.app.connector?.config?.timeouts?.warmUp || 120000;
+  
+  console.log(`Warming up ${url} (timeout: ${timeout / 1000}s)...`);
+  const start = Date.now();
+  
+  try {
+    const https = require('https');
+    await new Promise((resolve, reject) => {
+      const req = https.get(url, { timeout }, (res) => {
+        res.resume(); // Drain response
+        resolve(res.statusCode);
+      });
+      req.on('timeout', () => { req.destroy(); reject(new Error('Warm-up timeout')); });
+      req.on('error', reject);
+    });
+    
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    console.log(`  Service ready (${elapsed}s)`);
+  } catch (err) {
+    console.warn(`  Warm-up warning: ${err.message} — proceeding anyway`);
+  }
+}
+```
+
+Then in `initialize()`, call `await this.warmUp()` before the first `page.goto()`.
+
+**Estimated effort:** ~20 lines added to one file.
+
+### Change B: --skip-bug-detection CLI Flag
+
+**Files to modify:** `cli/commands/test.js`, `core/engine/test-orchestrator.js`
+
+**What:** Add `--skip-bug-detection` option to the test command. Pass it through as `options.skipBugDetection` to the orchestrator, which skips the Bug Detector invocation when the flag is true.
+
+In `cli/commands/test.js`:
+```javascript
+.option('--skip-bug-detection', 'Disable bug detection and Linear integration')
+```
+
+In `TestOrchestrator.run()` (or wherever bug detection is triggered):
+```javascript
+if (testResult.status === 'failed' && !options.skipBugDetection) {
+  await this.bugDetector.detectAndReport(testResult);
+}
+```
+
+**Estimated effort:** ~10 lines across 2 files.
 
 ---
 
 ## Implementation Steps
 
-### Step 1: Mac Mini System Prerequisites
+### Step 1: Verify Mac Mini System Prerequisites
 
-**What:** Install Node.js, verify system tools, install Playwright browsers.
+**What:** Confirm Node.js, git, and SQLite are available. The Mac Mini already has Node.js v24 installed per SETUP-STATUS.md — no need to install or downgrade.
 
 **Commands:**
 ```bash
-# Verify or install Node.js 18+ (use nvm for version management)
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-source ~/.zshrc  # or ~/.bashrc
-nvm install 20
-nvm use 20
-node --version  # Should print v20.x.x
+# Verify Node.js (v18+ required, v24 already installed)
+node --version  # Expected: v24.x.x
 
-# Verify git is available
+# Verify npm
+npm --version
+
+# Verify git
 git --version
 
-# Verify SQLite is available (ships with macOS)
+# Verify SQLite (ships with macOS)
 sqlite3 --version
 ```
 
-**Validation:**
-```bash
-node --version    # v20.x.x
-npm --version     # 10.x.x
-git --version     # git version 2.x.x
-sqlite3 --version # 3.x.x
-```
+**Validation:** All four commands return version numbers. Node.js must be v18+.
 
-**Notes:** If Node.js is already installed via Homebrew or another method, that's fine — just verify it's v18+. The nvm approach is recommended for version management but not required.
+**Notes:** Do NOT install Node.js 20 via nvm — the existing v24 installation is fine and newer. If for some reason Node.js is missing, install via `brew install node` or nvm, targeting v20+.
 
 ---
 
-### Step 2: Clone Repository and Install Dependencies
+### Step 2: Verify Repository and Install Dependencies
 
-**What:** Clone the qa-engine repo, install npm dependencies, install Playwright browsers.
+**What:** The qa-engine repo is already cloned on the Mac Mini. Verify it's up to date, install/update dependencies, and install Playwright browsers.
 
 **Commands:**
 ```bash
-# Clone the repo (adjust URL to actual GitHub repo)
-cd ~
-git clone https://github.com/traderjoel42/qa-engine.git
-cd qa-engine
+# Navigate to the repo
+cd ~/qa-engine  # Adjust path if cloned elsewhere
 
-# Install Node.js dependencies
+# Pull latest
+git pull
+
+# Install/update Node.js dependencies
 npm install
 
 # Install Playwright browsers (Chromium is the primary target)
 npx playwright install chromium
 
-# Verify Playwright works
+# Verify Playwright
 npx playwright --version
 ```
 
@@ -136,21 +210,18 @@ npx playwright --version
 # Verify dependencies installed
 ls node_modules/.package-lock.json  # Should exist
 
-# Verify Playwright browser is installed
-npx playwright install --dry-run chromium  # Should say "already installed"
-
-# Run the existing unit test suite to confirm nothing is broken
+# Run the existing unit test suite to confirm the codebase is clean
 npm test
-# Expected: 83 tests passing across Phase 1 implementation
+# Record the actual passing count — the spec no longer assumes a specific number
 ```
 
-**Notes:** If the existing test suite fails, STOP. Fix test failures before proceeding — the codebase should be clean before attempting integration with a real environment.
+**Notes:** If the test suite fails, STOP. Fix test failures before proceeding. Record the actual test count for the success criteria checklist — Phase 1 may have added tests since the original "83 tests" claim.
 
 ---
 
 ### Step 3: Configure Environment Variables
 
-**What:** Create `.env` file with all required secrets for staging integration.
+**What:** Create `.env` file with all required secrets. Env var names match `core/config.js` and `.env.example` in the actual codebase.
 
 **File:** `<repo>/.env`
 
@@ -166,10 +237,11 @@ BRAINSTORMY_TEST_PASSWORD=<password for qa-automation@brainstormy.co>
 
 # --- WhatsApp / Twilio ---
 # Used for sending test notifications and approval requests
-WHATSAPP_DEFAULT_RECIPIENT=whatsapp:+<Joel's phone number>
+# IMPORTANT: Var names must match core/config.js
+QA_ENGINE_NOTIFICATION_RECIPIENTS=whatsapp:+<Joel's phone number>
 TWILIO_ACCOUNT_SID=<Twilio account SID>
 TWILIO_AUTH_TOKEN=<Twilio auth token>
-TWILIO_WHATSAPP_FROM=whatsapp:+<Twilio WhatsApp sender number>
+TWILIO_FROM_NUMBER=whatsapp:+<Twilio WhatsApp sender number>
 
 # --- AI / LLM ---
 # Used by Bug Detector and Auto-Fixer (not needed for first run,
@@ -179,170 +251,161 @@ ANTHROPIC_API_KEY=<Anthropic API key>
 # --- Bug Tracking ---
 # Used by Bug Detector for creating Linear issues (not needed for first run)
 LINEAR_API_KEY=<Linear API key>
-
-# --- Environment ---
-QA_ENGINE_ENV=staging
 ```
+
+**Key differences from v1.0 spec:**
+- `TWILIO_FROM_NUMBER` (not `TWILIO_WHATSAPP_FROM`) — matches `core/config.js`
+- `QA_ENGINE_NOTIFICATION_RECIPIENTS` (not `WHATSAPP_DEFAULT_RECIPIENT`) — matches `core/config.js`, comma-separated
+- Removed `QA_ENGINE_ENV=staging` — no code reads this variable
 
 **Validation:**
 ```bash
 # Verify .env is loaded (from repo root)
-node -e "require('dotenv').config(); console.log('TWILIO_ACCOUNT_SID:', process.env.TWILIO_ACCOUNT_SID ? 'SET' : 'MISSING')"
-node -e "require('dotenv').config(); console.log('BRAINSTORMY_TEST_PASSWORD:', process.env.BRAINSTORMY_TEST_PASSWORD ? 'SET' : 'MISSING')"
-node -e "require('dotenv').config(); console.log('WHATSAPP_DEFAULT_RECIPIENT:', process.env.WHATSAPP_DEFAULT_RECIPIENT ? 'SET' : 'MISSING')"
+node -e "require('dotenv').config(); \
+  ['TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_FROM_NUMBER', \
+   'QA_ENGINE_NOTIFICATION_RECIPIENTS','BRAINSTORMY_TEST_PASSWORD', \
+   'ANTHROPIC_API_KEY','LINEAR_API_KEY'].forEach(k => \
+   console.log(k + ':', process.env[k] ? 'SET' : 'MISSING'))"
 
 # All should print SET, not MISSING
 ```
 
 **Security notes:**
-- `.env` must be in `.gitignore` (verify this exists in the repo)
+- Verify `.env` is in `.gitignore`: `grep '\.env' .gitignore`
 - Never commit credentials to the repository
-- The `.env.example` file in the repo documents required variables without values
+- Cross-reference `.env.example` in the repo for any additional vars that may have been added during Phase 1
 
 ---
 
 ### Step 4: Update app.config.json for Real Staging
 
-**What:** Update the Brainstormy app configuration to use the actual staging URL and test account.
+**What:** Update the Brainstormy app configuration to use the actual staging URL and test account. The config structure must match what `loadAppConfig()` and the BrainstormyConnector expect.
 
 **File:** `apps/brainstormy/app.config.json`
 
-Replace the environments block with the correct staging configuration:
+Update the following fields in the existing config structure (do not replace the entire file — preserve any keys not mentioned here):
 
 ```json
 {
   "app_id": "brainstormy",
   "name": "Brainstormy",
   "type": "ai-chat-app",
+  "baseUrl": "https://brainstormy-frontend-staging.onrender.com",
 
   "environments": {
     "staging": {
-      "url": "https://brainstormy-frontend-staging.onrender.com",
-      "auth": {
-        "type": "email_password",
-        "required": true,
-        "credentials": {
-          "email": "qa-automation@brainstormy.co",
-          "password_env": "BRAINSTORMY_TEST_PASSWORD"
-        }
-      }
+      "baseUrl": "https://brainstormy-frontend-staging.onrender.com"
     }
   },
 
   "connector": {
     "type": "brainstormy",
-    "base": "ai-chat-app"
-  },
-
-  "config": {
-    "auth_indicator": "[data-testid='user-menu']",
-    "ready_indicator": "[data-testid='app-loaded']",
-
-    "selectors": {
-      "login_email": "[name='email'], [name='emailAddress'], input[type='email']",
-      "login_password": "[name='password'], input[type='password']",
-      "login_submit": "[type='submit'], button:has-text('Continue'), button:has-text('Sign in')",
-      "logout": "[data-testid='logout-button']",
-
-      "chat_input": "[data-testid='chat-input']",
-      "chat_send": "[data-testid='send-button']",
-      "ai_message": "[data-testid='ai-message']",
-      "generating_indicator": "[data-testid='generating']",
-
-      "new_project_button": "[data-testid='new-project-button']",
-      "new_story_button": "[data-testid='new-story-button']",
-      "new_session_button": "[data-testid='new-session-button']"
-    },
-
-    "timeouts": {
-      "navigation": 90000,
-      "ai_response": 90000,
-      "bible_generation": 120000,
-      "warm_up": 120000,
-      "element_visible": 30000
+    "base": "ai-chat-app",
+    "config": {
+      "auth": {
+        "type": "email_password",
+        "required": true,
+        "email": "qa-automation@brainstormy.co",
+        "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
+      },
+      "selectors": {
+        "clerkEmailInput": "[name='emailAddress'], [name='email'], input[type='email']",
+        "clerkPasswordInput": "[name='password'], input[type='password']",
+        "clerkSubmitButton": "[type='submit'], button:has-text('Continue'), button:has-text('Sign in')",
+        "userMenu": "[data-testid='user-menu']",
+        "readyIndicator": "[data-testid='app-loaded']",
+        "chatInput": "[data-testid='chat-input']",
+        "sendButton": "[data-testid='send-button']",
+        "aiMessage": "[data-testid='ai-message']",
+        "generatingIndicator": "[data-testid='generating']",
+        "newProjectButton": "[data-testid='new-project-button']",
+        "newStoryButton": "[data-testid='new-story-button']",
+        "newSessionButton": "[data-testid='new-session-button']"
+      },
+      "timeouts": {
+        "navigation": 90000,
+        "aiResponse": 90000,
+        "bibleGeneration": 120000,
+        "warmUp": 120000
+      },
+      "testProjectName": "[QA] Smoke Test Project"
     }
   }
 }
 ```
 
-**Key changes from original spec:**
-- `url`: Changed from `https://staging.brainstormy.app` to `https://brainstormy-frontend-staging.onrender.com`
-- `credentials.email`: Changed from `testbot@brainstormy.app` to `qa-automation@brainstormy.co`
-- `selectors.login_*`: Added fallback selectors because Clerk's login form may use different attribute names than assumed in the original spec. These are comma-separated Playwright selector lists — it will match the first one found.
-- `timeouts.navigation`: Increased from 30000 to 90000 for Render cold starts
-- `timeouts.warm_up`: New field, 120 seconds for initial service wake-up
-- `timeouts.element_visible`: New field, generous wait for elements after navigation
+**Key differences from v1.0 spec (aligned with actual codebase):**
+- `baseUrl` (not `url`) at top level and in `environments.staging`
+- `connector.config.auth.passwordEnv` (not `credentials.password_env`)
+- `connector.config.selectors.clerkEmailInput` (not `config.selectors.login_email`)
+- `connector.config.timeouts` (not top-level `config.timeouts`)
+- `connector.config.testProjectName` (not `test_data.smoke_test_project_id`)
+- Added fallback selectors for Clerk inputs (comma-separated) since actual Clerk UI may differ from assumed `data-testid` values
+- `warmUp` timeout added to existing timeouts object
+- `navigation` increased from `30000` to `90000` for Render cold starts
 
 **Validation:**
 ```bash
-# Verify the config is valid JSON
-node -e "const c = require('./apps/brainstormy/app.config.json'); console.log('App:', c.name, '| URL:', c.environments.staging.url)"
-# Expected: App: Brainstormy | URL: https://brainstormy-frontend-staging.onrender.com
+# Verify the config is valid JSON and key fields are correct
+node -e "const c = require('./apps/brainstormy/app.config.json'); \
+  console.log('App:', c.name); \
+  console.log('URL:', c.baseUrl); \
+  console.log('Auth email:', c.connector.config.auth.email); \
+  console.log('Nav timeout:', c.connector.config.timeouts.navigation);"
+# Expected:
+#   App: Brainstormy
+#   URL: https://brainstormy-frontend-staging.onrender.com
+#   Auth email: qa-automation@brainstormy.co
+#   Nav timeout: 90000
 ```
 
 ---
 
-### Step 5: Initialize Database
+### Step 4a: Implement Warm-Up in Connector (Code Change)
 
-**What:** Run database migrations to create the SQLite schema.
-
-**Commands:**
-```bash
-# Run migrations
-node scripts/migrate.js
-
-# Verify schema was created
-sqlite3 database/qa.db ".tables"
-# Expected output should include: apps, test_runs, test_results, bugs, approvals, evidence_metadata
-
-# Verify the apps table structure
-sqlite3 database/qa.db ".schema apps"
-
-# Create the Brainstormy app record
-node scripts/create-app.js brainstormy
-# Or if no script exists, insert manually:
-# node -e "
-#   const db = require('better-sqlite3')('database/qa.db');
-#   db.prepare('INSERT INTO apps (id, name, type, config, status) VALUES (?, ?, ?, ?, ?)').run(
-#     'brainstormy-staging',
-#     'Brainstormy',
-#     'ai-chat',
-#     JSON.stringify(require('./apps/brainstormy/app.config.json')),
-#     'active'
-#   );
-#   console.log('App record created');
-# "
-```
+**What:** Add the `warmUp()` method to BrainstormyConnector (or BaseConnector) as described in "Code Changes Required" above, and call it from `initialize()`.
 
 **Validation:**
 ```bash
-# Verify app record exists
-sqlite3 database/qa.db "SELECT id, name, status FROM apps"
-# Expected: brainstormy-staging|Brainstormy|active (or similar)
+# Run unit tests to confirm no regressions
+npm test
+
+# Verify the warm-up method exists
+node -e "const C = require('./connectors/brainstormy/connector'); \
+  console.log('warmUp method:', typeof C.prototype.warmUp === 'function' ? 'EXISTS' : 'MISSING')"
+```
+
+**Commit:**
+```bash
+git add connectors/
+git commit -m "Add warmUp() to connector for Render cold-start handling"
 ```
 
 ---
 
-### Step 6: Create Evidence Directory Structure
+### Step 4b: Implement --skip-bug-detection CLI Flag (Code Change)
 
-**What:** Create the directory structure for storing test evidence (screenshots, logs, network captures).
-
-**Commands:**
-```bash
-mkdir -p evidence/brainstormy-staging
-```
+**What:** Add `--skip-bug-detection` option to the `test` CLI command as described in "Code Changes Required" above.
 
 **Validation:**
 ```bash
-ls -la evidence/
-# Should show brainstormy-staging directory
+# Verify the flag is recognized
+node cli/index.js test --help
+# Should list --skip-bug-detection in the options
+
+# Run unit tests to confirm no regressions
+npm test
 ```
 
-**Notes:** The EvidenceCollector creates per-run subdirectories automatically (`evidence/<app_id>/<test_run_id>/screenshots/`, etc.). We just need the top-level structure to exist.
+**Commit:**
+```bash
+git add cli/ core/
+git commit -m "Add --skip-bug-detection flag to CLI test command"
+```
 
 ---
 
-### Step 7: Validate Staging is Reachable
+### Step 5: Validate Staging is Reachable
 
 **What:** Confirm the staging environment is up and responding before attempting browser automation. This handles the Render cold-start scenario explicitly.
 
@@ -361,7 +424,7 @@ curl -o /dev/null -s -w "HTTP Status: %{http_code}\nTime: %{time_total}s\n" \
 - Check that the URL is spelled correctly
 - If the service returns 5xx, the staging backend may also need to wake up — Brainstormy's frontend makes API calls to a separate backend service on Render
 
-**Programmatic validation (create a quick verification script):**
+**Programmatic validation script:**
 
 **File:** `scripts/verify-staging.js`
 ```javascript
@@ -375,8 +438,8 @@ curl -o /dev/null -s -w "HTTP Status: %{http_code}\nTime: %{time_total}s\n" \
 const https = require('https');
 const config = require('../apps/brainstormy/app.config.json');
 
-const url = config.environments.staging.url;
-const timeout = config.config.timeouts.warm_up || 120000;
+const url = config.baseUrl || config.environments?.staging?.baseUrl;
+const timeout = config.connector?.config?.timeouts?.warmUp || 120000;
 
 console.log(`Checking staging at: ${url}`);
 console.log(`Timeout: ${timeout / 1000}s (cold start may take 30-60s)`);
@@ -419,9 +482,9 @@ node scripts/verify-staging.js
 
 ---
 
-### Step 8: Validate Test Account Authentication (Browser)
+### Step 6: Validate Test Account Authentication (Browser)
 
-**What:** Use Playwright to verify that the QA test account can log in to staging through Clerk's authentication flow. This is the critical integration point — if Clerk auth doesn't work, nothing else will.
+**What:** Use Playwright to verify that the QA test account can log in to staging through Clerk's authentication flow.
 
 **File:** `scripts/verify-auth.js`
 
@@ -431,19 +494,40 @@ node scripts/verify-staging.js
 /**
  * Verify QA test account can authenticate against staging.
  * Opens a real browser, navigates to staging, performs Clerk login.
+ * 
+ * Reads config from the actual app.config.json structure
+ * (connector.config.selectors, connector.config.auth, etc.)
  */
 
 require('dotenv').config();
 const { chromium } = require('playwright');
 const config = require('../apps/brainstormy/app.config.json');
 
-const stagingUrl = config.environments.staging.url;
-const email = config.environments.staging.auth.credentials.email;
-const password = process.env[config.environments.staging.auth.credentials.password_env];
+const stagingUrl = config.baseUrl;
+const connectorConfig = config.connector.config;
+const email = connectorConfig.auth.email;
+const password = process.env[connectorConfig.auth.passwordEnv];
 
 if (!password) {
-  console.error('❌ BRAINSTORMY_TEST_PASSWORD not set in .env');
+  console.error(`❌ ${connectorConfig.auth.passwordEnv} not set in .env`);
   process.exit(1);
+}
+
+// Helper: try multiple comma-separated selectors, return first match
+async function findBySelectors(page, selectorString, opts = {}) {
+  const selectors = selectorString.split(',').map(s => s.trim());
+  for (const selector of selectors) {
+    try {
+      const el = await page.waitForSelector(selector, {
+        timeout: opts.timeout || connectorConfig.timeouts.navigation,
+        state: opts.state || 'visible'
+      });
+      if (el) return { element: el, selector };
+    } catch {
+      // Try next
+    }
+  }
+  return { element: null, selector: null };
 }
 
 (async () => {
@@ -451,46 +535,27 @@ if (!password) {
   console.log('Launching browser...');
 
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 }
-  });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
   const page = await context.newPage();
 
+  // Ensure evidence directory exists
+  const fs = require('fs');
+  fs.mkdirSync('evidence', { recursive: true });
+
   try {
-    // Step 1: Navigate to staging (warm up)
+    // Step 1: Navigate (warm up)
     console.log('Navigating to staging (may take 30-60s for cold start)...');
     await page.goto(stagingUrl, {
       waitUntil: 'networkidle',
-      timeout: config.config.timeouts.warm_up
+      timeout: connectorConfig.timeouts.warmUp || 120000
     });
     console.log('  Page loaded');
-
-    // Step 2: Look for Clerk sign-in
-    // Clerk may redirect to a sign-in page or show a modal
-    // Wait for any email input to appear
-    console.log('Looking for login form...');
-
-    // Take a screenshot of initial state for debugging
     await page.screenshot({ path: 'evidence/debug-01-initial-load.png' });
 
-    // Try to find email input using fallback selectors
-    const emailSelectors = config.config.selectors.login_email.split(',').map(s => s.trim());
-    let emailInput = null;
-
-    for (const selector of emailSelectors) {
-      try {
-        emailInput = await page.waitForSelector(selector, {
-          timeout: config.config.timeouts.element_visible,
-          state: 'visible'
-        });
-        if (emailInput) {
-          console.log(`  Found email input: ${selector}`);
-          break;
-        }
-      } catch {
-        // Try next selector
-      }
-    }
+    // Step 2: Find email input
+    console.log('Looking for login form...');
+    let { element: emailInput, selector: emailSel } =
+      await findBySelectors(page, connectorConfig.selectors.clerkEmailInput, { timeout: 15000 });
 
     if (!emailInput) {
       // Clerk might need us to click "Sign In" first
@@ -508,115 +573,60 @@ if (!password) {
         await page.waitForTimeout(3000);
       }
 
-      // Try again after clicking
-      for (const selector of emailSelectors) {
-        try {
-          emailInput = await page.waitForSelector(selector, {
-            timeout: config.config.timeouts.element_visible,
-            state: 'visible'
-          });
-          if (emailInput) {
-            console.log(`  Found email input after sign-in click: ${selector}`);
-            break;
-          }
-        } catch {
-          // Try next selector
-        }
-      }
+      ({ element: emailInput, selector: emailSel } =
+        await findBySelectors(page, connectorConfig.selectors.clerkEmailInput, { timeout: 15000 }));
     }
 
     if (!emailInput) {
-      await page.screenshot({ path: 'evidence/debug-03-no-email-input-after-retry.png' });
-      throw new Error('Could not find email input field. Check evidence/debug-*.png screenshots.');
+      await page.screenshot({ path: 'evidence/debug-03-still-no-email-input.png' });
+      throw new Error('Could not find email input. Check evidence/debug-*.png');
     }
+    console.log(`  Found email input: ${emailSel}`);
 
-    // Step 3: Enter credentials
-    console.log('Entering credentials...');
+    // Step 3: Enter email, click continue
     await emailInput.fill(email);
 
-    // Clerk's flow: email first, then "Continue", then password
-    // Look for continue/submit button
-    const submitSelectors = config.config.selectors.login_submit.split(',').map(s => s.trim());
-    let submitButton = null;
+    const { element: submitBtn } =
+      await findBySelectors(page, connectorConfig.selectors.clerkSubmitButton, { timeout: 5000 });
 
-    for (const selector of submitSelectors) {
-      try {
-        submitButton = await page.$(selector);
-        if (submitButton && await submitButton.isVisible()) {
-          console.log(`  Found submit button: ${selector}`);
-          break;
-        }
-        submitButton = null;
-      } catch {
-        // Try next
-      }
-    }
-
-    if (submitButton) {
-      await submitButton.click();
-      console.log('  Clicked continue/submit after email');
+    if (submitBtn) {
+      await submitBtn.click();
+      console.log('  Clicked continue after email');
       await page.waitForTimeout(2000);
     }
 
-    // Now look for password field
-    const passwordSelectors = config.config.selectors.login_password.split(',').map(s => s.trim());
-    let passwordInput = null;
-
-    for (const selector of passwordSelectors) {
-      try {
-        passwordInput = await page.waitForSelector(selector, {
-          timeout: config.config.timeouts.element_visible,
-          state: 'visible'
-        });
-        if (passwordInput) {
-          console.log(`  Found password input: ${selector}`);
-          break;
-        }
-      } catch {
-        // Try next
-      }
-    }
+    // Step 4: Enter password
+    const { element: passwordInput, selector: pwSel } =
+      await findBySelectors(page, connectorConfig.selectors.clerkPasswordInput, { timeout: 15000 });
 
     if (!passwordInput) {
       await page.screenshot({ path: 'evidence/debug-04-no-password-input.png' });
-      throw new Error('Could not find password input field. Clerk may use a different flow. Check screenshots.');
+      throw new Error('Could not find password input. Check screenshots.');
     }
+    console.log(`  Found password input: ${pwSel}`);
 
     await passwordInput.fill(password);
 
-    // Click final submit
-    submitButton = null;
-    for (const selector of submitSelectors) {
-      try {
-        submitButton = await page.$(selector);
-        if (submitButton && await submitButton.isVisible()) break;
-        submitButton = null;
-      } catch {
-        // Try next
-      }
-    }
+    // Click submit again for password
+    const { element: submitBtn2 } =
+      await findBySelectors(page, connectorConfig.selectors.clerkSubmitButton, { timeout: 5000 });
 
-    if (submitButton) {
-      await submitButton.click();
+    if (submitBtn2) {
+      await submitBtn2.click();
       console.log('  Submitted credentials');
     }
 
-    // Step 4: Wait for authenticated state
+    // Step 5: Wait for authenticated state
     console.log('Waiting for authenticated state...');
 
-    // Wait for either the auth indicator or a reasonable page load
-    try {
-      await page.waitForSelector(config.config.auth_indicator, {
-        timeout: config.config.timeouts.navigation,
-        state: 'visible'
-      });
-      console.log('  ✅ Auth indicator found — login successful');
-    } catch {
-      // Auth indicator might not exist yet — check URL instead
+    const { element: authIndicator } =
+      await findBySelectors(page, connectorConfig.selectors.userMenu, { timeout: connectorConfig.timeouts.navigation });
+
+    if (authIndicator) {
+      console.log('  ✅ Auth indicator (userMenu) found — login successful');
+    } else {
       const currentUrl = page.url();
       console.log(`  Current URL: ${currentUrl}`);
-
-      // If we're no longer on a sign-in page, likely authenticated
       if (!currentUrl.includes('sign-in') && !currentUrl.includes('login')) {
         console.log('  ✅ No longer on sign-in page — likely authenticated');
       } else {
@@ -625,7 +635,6 @@ if (!password) {
       }
     }
 
-    // Step 5: Take success screenshot
     await page.screenshot({ path: 'evidence/debug-06-authenticated.png' });
     console.log('\n✅ Authentication verification PASSED');
     console.log(`   Account: ${email}`);
@@ -648,166 +657,105 @@ node scripts/verify-auth.js
 # Debug screenshots saved to evidence/debug-*.png regardless of outcome
 ```
 
-**If this fails:** The debug screenshots at each stage will show exactly where the flow broke down. Common issues:
-- Clerk UI changed selectors → update `app.config.json` selectors
+**If this fails:** The debug screenshots at each stage show exactly where the flow broke down. Common issues:
+- Clerk UI uses different selectors → update `connector.config.selectors` in `app.config.json`
 - Test account doesn't exist in staging Clerk → create it in the Clerk dashboard
 - Password is wrong → verify in `.env`
-- Clerk is using a different auth flow (e.g., magic link only) → need to enable password auth for the test account in Clerk settings
+- Clerk uses a different auth flow (e.g., magic link only) → enable password auth for the test account
 
 ---
 
-### Step 9: Verify Test Project Isolation
+### Step 7: Verify Test Project Isolation
 
 **What:** Confirm the QA test account has (or can create) a dedicated test project that won't interfere with real data.
-
-**Rationale:** The QA automation will create projects, stories, and sessions during testing. These must be isolated from any real user data in staging. The simplest approach: ensure the test account only creates resources prefixed with `[QA]` and has a cleanup mechanism.
 
 **Manual prerequisite (one-time, before first run):**
 
 1. Log in to `https://brainstormy-frontend-staging.onrender.com` as `qa-automation@brainstormy.co`
-2. Create a project named `[QA] Smoke Test Project`
-3. Note the project ID from the URL (e.g., `/projects/abc-123-def`)
-4. Add this project ID to `app.config.json` under a new `test_data` key:
+2. Create a project named `[QA] Smoke Test Project` (matching `connector.config.testProjectName` in the app config)
+3. Note the project ID from the URL (e.g., `/projects/abc-123-def`) for debugging reference
 
-```json
-{
-  "test_data": {
-    "smoke_test_project_id": "<project-id-from-url>",
-    "project_name_prefix": "[QA]"
-  }
-}
-```
-
-**Rationale for manual setup:** Auto-creating projects during testing is what the smoke test itself will validate. We need a known-good project to exist first so the initial smoke test can navigate to it and verify the UI works. Chicken-and-egg: use manual setup for the bootstrap, then let automation handle creation in subsequent tests.
+**Rationale for manual setup:** Auto-creating projects during testing is what the smoke test itself will validate. We need a known-good project to exist first so the initial smoke tests can navigate to it. Chicken-and-egg: use manual setup for the bootstrap, then let automation handle creation in subsequent tests.
 
 **Validation:**
 ```bash
-# Verify the project ID is configured
-node -e "const c = require('./apps/brainstormy/app.config.json'); console.log('Test project:', c.test_data?.smoke_test_project_id || 'NOT SET')"
+# Verify the testProjectName is configured
+node -e "const c = require('./apps/brainstormy/app.config.json'); \
+  console.log('Test project name:', c.connector.config.testProjectName || 'NOT SET')"
+# Expected: [QA] Smoke Test Project
 ```
 
 ---
 
-### Step 10: First Smoke Test Run
+### Step 8: First Smoke Test Run
 
-**What:** Execute a single smoke test through the CLI against real staging. This is the milestone — the first real test run.
+**What:** Execute the Healer agent's smoke tests through the CLI against real staging. This is the milestone — the first real test run.
 
-**Smoke test scenario (`apps/brainstormy/scenarios/smoke-login.json`):**
+**The existing smoke scenarios in `apps/brainstormy/scenarios/smoke-tests.json` contain:**
+- `smoke-01-login` — Authenticate and verify login
+- `smoke-02-navigate-project` — Navigate to a project page
+- (and potentially others added during Phase 1)
 
-If this file doesn't already exist from Phase 1, create it:
-
-```json
-{
-  "id": "smoke-login",
-  "name": "Login and Navigate Smoke Test",
-  "description": "Verify basic authentication and page navigation against staging",
-  "agent": "healer",
-  "priority": "critical",
-  "steps": [
-    {
-      "action": "warm_up",
-      "description": "Wake up Render service if cold",
-      "timeout": 120000
-    },
-    {
-      "action": "authenticate",
-      "description": "Log in with QA test account via Clerk"
-    },
-    {
-      "action": "verify_authenticated",
-      "description": "Confirm login succeeded by checking for auth indicator or dashboard"
-    },
-    {
-      "action": "navigate",
-      "target": "/projects",
-      "description": "Navigate to projects page"
-    },
-    {
-      "action": "verify_element_visible",
-      "selector": "[data-testid='new-project-button'], button:has-text('New Project'), .projects-list",
-      "description": "Verify projects page loaded with expected elements"
-    },
-    {
-      "action": "capture_evidence",
-      "type": "screenshot",
-      "name": "projects-page-loaded"
-    }
-  ],
-  "expected_outcome": {
-    "all_steps_complete": true,
-    "authenticated": true,
-    "evidence_captured": true
-  }
-}
-```
+These use the connector's existing `performAction()` vocabulary (`authenticate`, `createProject`, `navigateToStory`, etc.) and do not need to be rewritten.
 
 **Run command:**
 ```bash
-# Run the smoke test (with bug detection disabled for first run)
-qa-engine test --app brainstormy --agent healer --scenario smoke-login --no-bug-detection
-
-# Or if the CLI isn't globally linked yet:
-node cli/index.js test --app brainstormy --agent healer --scenario smoke-login --no-bug-detection
+# Run smoke tests with bug detection disabled
+node cli/index.js test --app brainstormy --agent healer --mode smoke --skip-bug-detection
 ```
 
 **What success looks like:**
 ```
 QA Engine v1.0.0
 ═══════════════════════════════════════════
-Running: smoke-login (Healer Agent)
+Running: Healer Agent (smoke mode)
 Target:  https://brainstormy-frontend-staging.onrender.com
 ═══════════════════════════════════════════
 
-[1/6] Warming up staging service...          ✅ (34.2s)
-[2/6] Authenticating qa-automation@...       ✅ (3.1s)
-[3/6] Verifying authenticated state...       ✅ (0.8s)
-[4/6] Navigating to /projects...             ✅ (2.1s)
-[5/6] Verifying projects page elements...    ✅ (0.5s)
-[6/6] Capturing evidence...                  ✅ (0.3s)
+Warming up service...                        ✅ (34.2s)
+[smoke-01-login] Authenticating...           ✅ (3.1s)
+[smoke-01-login] Verifying auth state...     ✅ (0.8s)
+[smoke-02-navigate-project] Navigating...    ✅ (2.1s)
+[smoke-02-navigate-project] Verifying...     ✅ (0.5s)
 
 ═══════════════════════════════════════════
-RESULT: PASSED  (41.0s total)
+RESULT: PASSED
 ═══════════════════════════════════════════
-Test Run ID:  tr-20260213-001
-Evidence:     evidence/brainstormy-staging/tr-20260213-001/
-Screenshots:  3
-Console Logs: captured
-Network Reqs: captured
+Test Run ID:  <uuid>
+Evidence:     evidence/brainstormy/<run-id>/
 ```
 
 **Validation checklist after the run:**
 ```bash
 # 1. Verify test run was recorded in SQLite
-sqlite3 database/qa.db "SELECT id, status, summary FROM test_runs ORDER BY started_at DESC LIMIT 1"
+sqlite3 data/qa-engine.db "SELECT id, status, summary FROM test_runs ORDER BY started_at DESC LIMIT 1"
 # Expected: shows the run with status 'completed' and summary JSON
 
-# 2. Verify test result was recorded
-sqlite3 database/qa.db "SELECT test_name, status, duration_ms FROM test_results ORDER BY executed_at DESC LIMIT 1"
-# Expected: smoke-login | passed | ~41000
+# 2. Verify test results were recorded
+sqlite3 data/qa-engine.db "SELECT test_name, status, duration_ms FROM test_results ORDER BY executed_at DESC LIMIT 5"
+# Expected: smoke-01-login | passed, smoke-02-navigate-project | passed, etc.
 
-# 3. Verify evidence was stored
-ls evidence/brainstormy-staging/
+# 3. Verify evidence was stored on disk
+ls evidence/brainstormy/
 # Expected: directory named with the test run ID
 
-ls evidence/brainstormy-staging/tr-*/screenshots/
-# Expected: screenshot files (PNG)
-
-ls evidence/brainstormy-staging/tr-*/logs/
-# Expected: console log capture file
-
-ls evidence/brainstormy-staging/tr-*/network/
-# Expected: network request capture file
+find evidence/brainstormy/ -name "*.png" | head -5
+# Expected: screenshot files
 
 # 4. Verify evidence metadata was recorded in SQLite
-sqlite3 database/qa.db "SELECT file_type, file_path FROM evidence_metadata ORDER BY created_at DESC LIMIT 5"
+sqlite3 data/qa-engine.db "SELECT file_type, file_path FROM evidence_metadata ORDER BY created_at DESC LIMIT 5"
 # Expected: screenshot, log, and network entries with valid file paths
+
+# 5. Verify all expected tables exist
+sqlite3 data/qa-engine.db ".tables"
+# Expected includes: apps, test_runs, test_results, bugs, approvals, evidence_metadata, fixes, scheduled_runs, schema_migrations
 ```
 
 ---
 
-### Step 11: First WhatsApp Notification
+### Step 9: First WhatsApp Notification
 
-**What:** Send a test notification via Twilio to verify WhatsApp delivery works.
+**What:** Send a test notification via Twilio to verify WhatsApp delivery works. This is a standalone script using the correct env var names from `core/config.js`.
 
 **File:** `scripts/verify-whatsapp.js`
 
@@ -817,6 +765,10 @@ sqlite3 database/qa.db "SELECT file_type, file_path FROM evidence_metadata ORDER
 /**
  * Send a test WhatsApp notification to verify Twilio configuration.
  * Standalone — does not depend on test run infrastructure.
+ * 
+ * Uses env var names matching core/config.js:
+ *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER,
+ *   QA_ENGINE_NOTIFICATION_RECIPIENTS
  */
 
 require('dotenv').config();
@@ -824,20 +776,24 @@ const twilio = require('twilio');
 
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
-const from = process.env.TWILIO_WHATSAPP_FROM;
-const to = process.env.WHATSAPP_DEFAULT_RECIPIENT;
+const from = process.env.TWILIO_FROM_NUMBER;
+const recipients = process.env.QA_ENGINE_NOTIFICATION_RECIPIENTS;
 
 // Validate all required vars
 const missing = [];
 if (!accountSid) missing.push('TWILIO_ACCOUNT_SID');
 if (!authToken) missing.push('TWILIO_AUTH_TOKEN');
-if (!from) missing.push('TWILIO_WHATSAPP_FROM');
-if (!to) missing.push('WHATSAPP_DEFAULT_RECIPIENT');
+if (!from) missing.push('TWILIO_FROM_NUMBER');
+if (!recipients) missing.push('QA_ENGINE_NOTIFICATION_RECIPIENTS');
 
 if (missing.length > 0) {
   console.error(`❌ Missing environment variables: ${missing.join(', ')}`);
+  console.error('   Check .env file — var names must match core/config.js');
   process.exit(1);
 }
+
+// QA_ENGINE_NOTIFICATION_RECIPIENTS is comma-separated; use the first one
+const to = recipients.split(',')[0].trim();
 
 console.log(`Sending test notification...`);
 console.log(`  From: ${from}`);
@@ -869,12 +825,11 @@ client.messages
     console.error(`\n❌ Failed to send message: ${err.message}`);
 
     if (err.code === 20003) {
-      console.error('   Authentication failed — check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN');
+      console.error('   Auth failed — check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN');
     } else if (err.code === 21608) {
-      console.error('   Unverified recipient — the "to" number needs to join the Twilio sandbox');
-      console.error('   Send "join <sandbox-keyword>" from your WhatsApp to the Twilio number');
+      console.error('   Unverified recipient — send "join <sandbox-keyword>" from WhatsApp to Twilio number first');
     } else if (err.code === 21211) {
-      console.error('   Invalid "to" number — check WHATSAPP_DEFAULT_RECIPIENT format');
+      console.error('   Invalid "to" number — check QA_ENGINE_NOTIFICATION_RECIPIENTS format');
       console.error('   Should be: whatsapp:+1234567890');
     }
 
@@ -886,33 +841,47 @@ client.messages
 ```bash
 node scripts/verify-whatsapp.js
 # Expected: ✅ Message sent successfully
-# Then check phone: WhatsApp message from Twilio should arrive within seconds
+# Then check phone: WhatsApp message should arrive within seconds
 ```
 
 **Common issues:**
-- Error 21608 (unverified): For Twilio sandbox, Joel must send "join <keyword>" from his WhatsApp to the Twilio number first. This is a one-time setup.
+- Error 21608 (unverified): For Twilio sandbox, send "join \<keyword\>" from WhatsApp to the Twilio number first. One-time setup.
 - Error 20003 (auth): Double-check SID and auth token in `.env`
-- Message sent but not received: Check Twilio console for delivery status. May need to wait or re-join sandbox.
+- Message sent but not received: Check Twilio console for delivery status
 
 ---
 
 ## Post-Validation: Selector Calibration
 
-The first run will very likely require selector adjustments. Clerk's login form and Brainstormy's UI may use different attributes than what's assumed in the config. This is expected and not a failure — it's calibration.
+The first run will very likely require selector adjustments. Clerk's login form and Brainstormy's UI may use different attributes than what's in the config. This is expected and not a failure — it's calibration.
 
 **Process when a step fails due to selectors:**
 
-1. Check the debug screenshots in `evidence/` — they show exactly what the page looked like at the point of failure
+1. Check the debug screenshots in `evidence/` — they show what the page looked like at failure
 2. Open the staging URL in a regular browser, inspect the element
-3. Update the selector in `app.config.json`
-4. Re-run the verification script or smoke test
+3. Update the selector in `connector.config.selectors` in `app.config.json`
+4. Re-run `scripts/verify-auth.js` or the smoke test
 5. Repeat until all steps pass
 
-**Once the smoke test passes cleanly, commit the calibrated selectors:**
+**Once the smoke test passes cleanly, commit the calibrated config:**
 ```bash
 git add apps/brainstormy/app.config.json
-git commit -m "Calibrate selectors for real staging environment"
+git commit -m "Calibrate selectors and config for real staging environment"
+git push
 ```
+
+---
+
+## Link to npm for Global CLI (Optional)
+
+The `package.json` has a `bin` entry mapping `qa-engine` → `./cli/index.js`. To use the short-form `qa-engine test` instead of `node cli/index.js test`:
+
+```bash
+npm link
+qa-engine --version  # Should work now
+```
+
+This is optional — all commands in this spec use the explicit `node cli/index.js` form to avoid assumptions.
 
 ---
 
@@ -921,44 +890,80 @@ git commit -m "Calibrate selectors for real staging environment"
 All items must be checked before this task is complete:
 
 ### Environment Setup
-- [ ] Node.js 20+ installed and verified on Mac Mini
-- [ ] Repository cloned and npm dependencies installed
+- [ ] Node.js v18+ verified on Mac Mini (v24 already installed)
+- [ ] Repository up to date (`git pull`) and npm dependencies installed
 - [ ] Playwright Chromium browser installed
-- [ ] Existing unit tests pass (83 tests, zero regressions)
-- [ ] `.env` file created with all 7 environment variables set
+- [ ] Existing unit tests pass (record actual count: ______)
+- [ ] `.env` file created with all required variables (correct names per `core/config.js`)
 - [ ] `.env` is in `.gitignore`
 
+### Code Changes
+- [ ] `warmUp()` method added to connector, called from `initialize()`
+- [ ] `--skip-bug-detection` flag added to CLI `test` command
+- [ ] All existing tests still pass after code changes
+
 ### Configuration
-- [ ] `app.config.json` updated with correct staging URL (`brainstormy-frontend-staging.onrender.com`)
-- [ ] `app.config.json` updated with correct test account (`qa-automation@brainstormy.co`)
-- [ ] Timeouts configured for Render cold starts (90s navigation, 120s warm-up)
-- [ ] Login selectors calibrated against actual Clerk UI
+- [ ] `app.config.json` updated with correct staging `baseUrl` (`brainstormy-frontend-staging.onrender.com`)
+- [ ] `app.config.json` updated with correct test account email (`qa-automation@brainstormy.co`)
+- [ ] `connector.config.timeouts.navigation` set to `90000`
+- [ ] `connector.config.timeouts.warmUp` set to `120000`
+- [ ] `connector.config.selectors` calibrated against actual Clerk UI
 
 ### Database & Storage
-- [ ] SQLite database created at `database/qa.db`
-- [ ] All schema tables present (apps, test_runs, test_results, bugs, approvals, evidence_metadata)
-- [ ] Brainstormy app record inserted
-- [ ] Evidence directory structure created
+- [ ] SQLite database auto-created at `data/qa-engine.db` on first engine run
+- [ ] All expected tables present (including `fixes`, `scheduled_runs`, `schema_migrations`)
+- [ ] Evidence directory structure created under `evidence/`
 
 ### Staging Validation
-- [ ] `verify-staging.js` confirms staging is reachable (HTTP 200)
-- [ ] `verify-auth.js` confirms test account can authenticate through Clerk
-- [ ] QA test project exists in staging (manual creation, one-time)
+- [ ] `scripts/verify-staging.js` confirms staging is reachable (HTTP 200)
+- [ ] `scripts/verify-auth.js` confirms test account can authenticate through Clerk
+- [ ] QA test project `[QA] Smoke Test Project` exists in staging (manual creation, one-time)
 
 ### First Smoke Test
-- [ ] `qa-engine test` command executes successfully with `smoke-login` scenario
-- [ ] Test status is `passed`
-- [ ] Test run recorded in SQLite `test_runs` table
-- [ ] Test result recorded in SQLite `test_results` table
+- [ ] `node cli/index.js test --app brainstormy --agent healer --mode smoke --skip-bug-detection` executes successfully
+- [ ] Test status is `passed` (or failures are clearly selector calibration issues, not infrastructure problems)
+- [ ] Test run recorded in `data/qa-engine.db` `test_runs` table
+- [ ] Test results recorded in `data/qa-engine.db` `test_results` table
 - [ ] Screenshots captured and stored in evidence directory
 - [ ] Console logs captured
 - [ ] Network requests captured
-- [ ] Evidence metadata recorded in SQLite `evidence_metadata` table
+- [ ] Evidence metadata recorded in `data/qa-engine.db` `evidence_metadata` table
 
 ### WhatsApp Notification
-- [ ] `verify-whatsapp.js` sends message successfully (Twilio returns SID)
+- [ ] `scripts/verify-whatsapp.js` sends message successfully (Twilio returns SID)
 - [ ] WhatsApp message received on Joel's phone
 - [ ] Message content is readable and correctly formatted
+
+---
+
+## Evaluation Findings Cross-Reference
+
+This table maps each finding from the Claude Code feasibility evaluation to its resolution in this spec:
+
+| # | Finding | Severity | Resolution in v2.0 |
+|---|---------|----------|---------------------|
+| 1 | DB path `database/qa.db` vs `data/qa-engine.db` | CRITICAL | Fixed — all references use `data/qa-engine.db` |
+| 2 | `scripts/migrate.js` doesn't exist | CRITICAL | Removed — DB initializes automatically on first engine run |
+| 3 | `scripts/create-app.js` doesn't exist | CRITICAL | Removed — apps load from JSON files at runtime |
+| 4 | `--no-bug-detection` flag missing | CRITICAL | Changed to `--skip-bug-detection`, listed as required code change (Step 4b) |
+| 5 | `--scenario` flag missing | CRITICAL | Removed — uses existing `--mode smoke` instead |
+| 6 | Scenario file structure mismatch | CRITICAL | Removed — uses existing `smoke-tests.json` scenarios |
+| 7 | `TWILIO_WHATSAPP_FROM` vs `TWILIO_FROM_NUMBER` | CRITICAL | Fixed — uses `TWILIO_FROM_NUMBER` throughout |
+| 8 | `WHATSAPP_DEFAULT_RECIPIENT` not recognized | CRITICAL | Fixed — uses `QA_ENGINE_NOTIFICATION_RECIPIENTS` |
+| 9 | `app.config.json` structure mismatch | SIGNIFICANT | Fixed — uses `baseUrl`, `connector.config.*`, `camelCase` keys |
+| 10 | No warm-up capability | SIGNIFICANT | Listed as required code change (Step 4a) with implementation |
+| 11 | No `notify` CLI command | SIGNIFICANT | Removed — uses standalone `scripts/verify-whatsapp.js` only |
+| 12 | Scenario action types don't match connector | SIGNIFICANT | Removed — uses existing smoke-tests.json with existing action vocabulary |
+| 13 | `test_data` config key not recognized | SIGNIFICANT | Fixed — uses `connector.config.testProjectName` |
+| 14 | Node.js 20 vs 24 already installed | MODERATE | Fixed — Step 1 says verify v18+, acknowledges v24 |
+| 15 | Selector key naming mismatch | MODERATE | Fixed — verification scripts use `connector.config.selectors.clerkEmailInput` etc. |
+| 16 | Missing tables in expected list | MODERATE | Fixed — checklist includes `fixes`, `scheduled_runs`, `schema_migrations` |
+| 17 | Test count needs verification | MODERATE | Fixed — prerequisite says "run `npm test` to confirm actual count" |
+| 18 | Verification scripts reference wrong config paths | MODERATE | Fixed — scripts read from `config.connector.config.*` |
+| 19 | `QA_ENGINE_ENV` not used | MINOR | Removed from `.env` template |
+| 20 | `.env.example` uses `TWILIO_FROM_NUMBER` | MINOR | Resolved by #7 |
+| 21 | `better-sqlite3` inline scripts | MINOR | Removed — no manual DB operations needed |
+| 22 | `npm link` needed for global command | MINOR | Added optional section explaining `npm link` |
 
 ---
 
@@ -967,8 +972,8 @@ All items must be checked before this task is complete:
 After this task passes all success criteria, the following tasks can be specced:
 
 1. **Expanded smoke scenarios** — Add project creation, story creation, session creation, and message-send scenarios to the Healer agent
-2. **Selector hardening** — Add `data-testid` attributes to Brainstormy frontend components where missing, reducing reliance on fragile CSS selectors
-3. **Bug detection activation** — Enable the Bug Detector with Linear integration for real failure classification
+2. **Selector hardening** — Add `data-testid` attributes to Brainstormy frontend components where missing
+3. **Bug detection activation** — Enable the Bug Detector with Linear integration (remove `--skip-bug-detection`)
 4. **Scheduler activation** — Configure launchd to run smoke tests on a schedule
 5. **Daily operations** — Morning review workflow, metrics tracking, WhatsApp summary reports
 
