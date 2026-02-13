@@ -19,4 +19,13 @@
 - **Files modified:** `core/engine/errors.js`
 - **Status:** done
 - **Deviations:** None — added AppLoaderError class and export per spec section 4.4
+- **Commit:** 425a18b
+
+---
+
+## Step 3: Create core/engine/factory.js
+
+- **Files created:** `core/engine/factory.js`
+- **Status:** done
+- **Deviations:** None — implemented verbatim from spec section 4.3
 - **Commit:** (see below)
