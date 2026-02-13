@@ -2352,3 +2352,30 @@ curl http://localhost:3001/health
 - **WhatsApp media messages (images, files):** Phase 2
 - **Rate limiting:** Phase 2
 - **Conversation state / follow-ups:** Phase 2 (e.g., "run that again")
+
+---
+
+## Task Completion Summary
+
+- **Date:** February 12, 2026
+- **Total files created:** 9 (5 source + 4 test)
+  - `interfaces/whatsapp-bot/message-parser.js`
+  - `interfaces/whatsapp-bot/notification-templates.js`
+  - `interfaces/whatsapp-bot/command-handler.js`
+  - `interfaces/whatsapp-bot/server.js`
+  - `interfaces/whatsapp-bot/index.js`
+  - `tests/whatsapp-bot/message-parser.test.js`
+  - `tests/whatsapp-bot/notification-templates.test.js`
+  - `tests/whatsapp-bot/command-handler.test.js`
+  - `tests/whatsapp-bot/server.test.js`
+- **Total files modified:** 4
+  - `core/engine/factory.js` (added approve/reject/bugInfo methods, enhanced status)
+  - `cli/commands/status.js` (adapted to new status return shape)
+  - `tests/engine/factory.test.js` (10 new tests)
+  - `tests/cli/status-command.test.js` (updated mocks)
+- **Total new tests:** 203 (10 factory + 193 whatsapp-bot)
+- **Total project tests:** 1,817
+- **Deviations from spec:**
+  - Added `.trim()` in `parseRunCommand()` — spec regex didn't handle trailing whitespace but spec test expected it
+  - Test counts exceeded spec estimates: 59 vs ~52 (parser), 41 vs ~28 (templates), 46 vs ~45 (handler), 47 vs ~42 (server)
+- **Final status:** All 1,817 tests passing, 0 failures, 0 regressions
