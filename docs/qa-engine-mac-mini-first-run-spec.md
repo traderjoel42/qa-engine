@@ -1,6 +1,6 @@
 # QA Engine: Mac Mini Environment Setup & First-Run Validation
 
-**Version:** 3.1  
+**Version:** 3.2  
 **Date:** February 13, 2026  
 **Phase:** 2, Task 1  
 **Prerequisite:** Phase 1 complete — run `npm test` on Mac Mini to confirm actual passing count  
@@ -10,6 +10,7 @@
 - v2.0: Reconciled all naming/path/config mismatches with actual codebase (22 findings)
 - v3.0: Addresses execution pipeline gaps found in v2.0 deep evaluation (12 findings) — CLI browser lifecycle, scenario loading, scenario format compatibility, auth credential nesting, and `.gitignore` gaps
 - v3.1: Fixes 2 runtime failures and 2 code sample inaccuracies from v3.0 deep-trace evaluation (6 findings) — getBaseURL() override, assertion selector resolution, EvidenceCollector constructor signature, engine closure variable reference
+- v3.2: Fixes 1 runtime error and 2 code inaccuracies from v3.1 evaluation (3 findings) — EvidenceCollector require path, skipBugDetection options threading + overallStatus, appsDir closure variable
 
 ---
 
@@ -187,12 +188,24 @@ In `cli/commands/test.js`:
 .option('--skip-bug-detection', 'Disable bug detection and Linear integration')
 ```
 
-In `_runPostHooks()` (or equivalent failure handling path):
+In `_runPostHooks()` — the orchestrator's `_runPostHooks(result)` at line 480 only receives `result` and has no access to run options. Thread it through:
+
+In `_executeRun()` where `_runPostHooks` is called (~line 295):
 ```javascript
-if (result.status === 'failed' && !this._options.skipBugDetection) {
+// Change from:
+await this._runPostHooks(result);
+// To:
+await this._runPostHooks(result, options);
+```
+
+In `_runPostHooks(result, options = {})`:
+```javascript
+if (result.overallStatus !== 'passed' && !options.skipBugDetection) {
   await this._failureHandler.handle(result);
 }
 ```
+
+Note: the orchestrator uses `result.overallStatus` (set at test-orchestrator.js:279), not `result.status`.
 
 **Estimated effort:** ~25 lines across 3 files.
 
@@ -233,7 +246,7 @@ async run(appId, options = {}) {
   }
 
   if (!options.evidenceCollector) {
-    const EvidenceCollector = require('./engine/evidence-collector');
+    const EvidenceCollector = require('./evidence-collector');
     // EvidenceCollector constructor requires { runId, appId, basePath }
     // NOT { page } — page is attached via initialize() separately
     const runId = `run-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
@@ -284,7 +297,7 @@ The scenarios exist in `apps/brainstormy/scenarios/smoke-tests.json` but nothing
 
 **Part 2 — Add scenario file loading to the engine:**
 
-In `factory.js`, when registering agents, resolve `scenarioFiles` to actual scenario data:
+In `factory.js`, when registering agents, resolve `scenarioFiles` to actual scenario data. Use the `appsDir` closure variable (from `config.engine.appsDir`, defined at factory.js:269) rather than hardcoding `'apps'`:
 
 ```javascript
 // In the agent registration loop
@@ -297,7 +310,7 @@ if (agentConfig.scenarioFiles && Array.isArray(agentConfig.scenarioFiles)) {
   agentConfig.scenarios = [];
 
   for (const scenarioFile of agentConfig.scenarioFiles) {
-    const filePath = path.resolve(`apps/${appId}`, scenarioFile);
+    const filePath = path.resolve(appsDir, appId, scenarioFile);
     if (fs.existsSync(filePath)) {
       const loaded = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       // Handle both single scenario and array of scenarios
@@ -1309,6 +1322,14 @@ All items must be checked before this task is complete:
 | 4 | Change C uses `this._orchestrator` but engine is object literal with closure vars | CODE FIX | Corrected Change C: uses closure variable `orchestrator`, passes `appConfig` not `appId` |
 | 5 | `--mode smoke` doesn't actually filter scenarios in `BaseAgent.getScenarios()` | MINOR | Noted in D3; non-blocking since all scenarios in rewritten file are smoke tests |
 | 6 | `setTimeout` in `warmUp()` never cleared on normal completion | MINOR | Added `clearTimeout(deadline)` and settled-flag pattern to Change A |
+
+### v3.1 → v3.2 Findings (3 items — all resolved in v3.2)
+
+| # | Finding | Severity | Resolution |
+|---|---------|----------|-----------|
+| 1 | `require('./engine/evidence-collector')` wrong path — factory.js is already in `core/engine/` | RUNTIME ERROR | Fixed to `require('./evidence-collector')` in Change C |
+| 2 | `this._options.skipBugDetection` — orchestrator has no `this._options`; also `result.status` vs `result.overallStatus` | CODE INACCURACY | Fixed Change B: thread `options` into `_runPostHooks(result, options)`, use `result.overallStatus !== 'passed'` |
+| 3 | Hardcoded `'apps'` path in scenario loading instead of `appsDir` closure variable | MINOR | Fixed Change D: uses `path.resolve(appsDir, appId, scenarioFile)` |
 
 ---
 
