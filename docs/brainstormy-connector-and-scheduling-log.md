@@ -102,3 +102,35 @@
   - bible-tests.json: 4 scenarios (generate standard, sections populated, outline report with citations, citation validity)
   - Verification: All 3 files valid JSON, 14 total scenarios
 - **Deviations:** None — implemented verbatim from spec
+
+---
+
+## Step 8: Integration test — connector + scenario loader
+
+- **Status:** done
+- **Changes:**
+  - Verified all scenario actions resolve to strings: `navigate, setup_test_project, create_story, create_session, send_message, wait_for_response, search` — PASS
+  - No new files needed
+- **Deviations:** None
+
+---
+
+## Step 9: Verify connector works with mock page
+
+- **Status:** done
+- **Changes:**
+  - Ran `npm test -- tests/connectors/brainstormy-connector.test.js --verbose` — 39 tests passing
+  - All performAction routes work with mock page
+- **Deviations:** None
+
+---
+
+## Step 10: Mock factories
+
+- **Status:** done (already exist)
+- **Changes:**
+  - Mock factories already exist at `tests/helpers/mock-playwright.js` (updated in Step 6)
+  - Contains: `createMockPage()`, `createMockElement()`, `createMockCitationElement()`, `createBrainstormyAppConfig()`, `createMockConsoleMessage()`, `createMockRequest()`, `createMockResponse()`
+  - Mock evidence collector is defined locally in each test file (following existing pattern)
+  - Spec's `createMockOrchestrator()` and `createTestDb()` will be created in-line in Steps 12-14 (scheduler/repository test files)
+- **Deviations:** Spec verification path `tests/mocks/playwright-page` doesn't exist — project uses `tests/helpers/mock-playwright.js` instead. No new directory created.
