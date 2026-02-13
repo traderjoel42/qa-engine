@@ -9,6 +9,7 @@ const BugRepository = require('./repositories/bug-repository');
 const ApprovalRepository = require('./repositories/approval-repository');
 const FixRepository = require('./repositories/fix-repository');
 const EvidenceMetadataRepository = require('./repositories/evidence-metadata-repository');
+const ScheduledRunRepository = require('./repositories/scheduled-run-repository');
 const BaseRepository = require('./repositories/base-repository');
 
 async function createDatabase(options = {}) {
@@ -29,6 +30,7 @@ async function createDatabase(options = {}) {
     approvals: new ApprovalRepository(connection),
     fixes: new FixRepository(connection),
     evidenceMetadata: new EvidenceMetadataRepository(connection),
+    scheduledRuns: new ScheduledRunRepository(connection),
     close: () => connection.close()
   };
 }
@@ -44,5 +46,6 @@ module.exports = {
   BugRepository,
   ApprovalRepository,
   FixRepository,
-  EvidenceMetadataRepository
+  EvidenceMetadataRepository,
+  ScheduledRunRepository
 };

@@ -10,10 +10,11 @@ const BugRepository = require('../../core/database/repositories/bug-repository')
 const ApprovalRepository = require('../../core/database/repositories/approval-repository');
 const FixRepository = require('../../core/database/repositories/fix-repository');
 const EvidenceMetadataRepository = require('../../core/database/repositories/evidence-metadata-repository');
+const ScheduledRunRepository = require('../../core/database/repositories/scheduled-run-repository');
 
 describe('Concrete Repositories', () => {
   let conn;
-  let appRepo, testRunRepo, testResultRepo, bugRepo, approvalRepo, fixRepo, evidenceRepo;
+  let appRepo, testRunRepo, testResultRepo, bugRepo, approvalRepo, fixRepo, evidenceRepo, scheduledRunRepo;
 
   beforeEach(async () => {
     conn = new DatabaseConnection();
@@ -28,6 +29,7 @@ describe('Concrete Repositories', () => {
     approvalRepo = new ApprovalRepository(conn);
     fixRepo = new FixRepository(conn);
     evidenceRepo = new EvidenceMetadataRepository(conn);
+    scheduledRunRepo = new ScheduledRunRepository(conn);
   });
 
   afterEach(() => {
@@ -166,6 +168,70 @@ describe('Concrete Repositories', () => {
 
     it('getPassRate() returns null when no completed runs', () => {
       expect(testRunRepo.getPassRate(app.id)).toBeNull();
+    });
+
+    describe('getRunsSince()', () => {
+      it('returns runs after the given timestamp', () => {
+        // Create runs with different started_at timestamps
+        testRunRepo.create({
+          app_id: app.id,
+          agents: ['healer'],
+          started_at: '2026-02-10T00:00:00Z'
+        });
+        testRunRepo.create({
+          app_id: app.id,
+          agents: ['healer'],
+          started_at: '2026-02-12T00:00:00Z'
+        });
+        testRunRepo.create({
+          app_id: app.id,
+          agents: ['healer'],
+          started_at: '2026-02-13T00:00:00Z'
+        });
+
+        const runs = testRunRepo.getRunsSince(app.id, '2026-02-11T00:00:00Z');
+        expect(runs).toHaveLength(2);
+      });
+
+      it('filters by app_id', () => {
+        const app2 = seedApp({ name: 'Other App' });
+        testRunRepo.create({
+          app_id: app.id,
+          agents: ['healer'],
+          started_at: '2026-02-13T00:00:00Z'
+        });
+        testRunRepo.create({
+          app_id: app2.id,
+          agents: ['sentinel'],
+          started_at: '2026-02-13T00:00:00Z'
+        });
+
+        const runs = testRunRepo.getRunsSince(app.id, '2026-02-12T00:00:00Z');
+        expect(runs).toHaveLength(1);
+        expect(runs[0].app_id).toBe(app.id);
+      });
+
+      it('returns empty array when no runs match', () => {
+        const runs = testRunRepo.getRunsSince(app.id, '2099-01-01T00:00:00Z');
+        expect(runs).toEqual([]);
+      });
+
+      it('orders results by started_at descending', () => {
+        testRunRepo.create({
+          app_id: app.id,
+          agents: ['healer'],
+          started_at: '2026-02-11T00:00:00Z'
+        });
+        testRunRepo.create({
+          app_id: app.id,
+          agents: ['sentinel'],
+          started_at: '2026-02-13T00:00:00Z'
+        });
+
+        const runs = testRunRepo.getRunsSince(app.id, '2026-02-10T00:00:00Z');
+        expect(runs).toHaveLength(2);
+        expect(runs[0].started_at >= runs[1].started_at).toBe(true);
+      });
     });
   });
 
@@ -501,6 +567,110 @@ describe('Concrete Repositories', () => {
       expect(testRunRepo.findByApp(app.id)).toHaveLength(0);
       expect(bugRepo.findByApp(app.id)).toHaveLength(0);
       expect(testResultRepo.findByTestRun(run.id)).toHaveLength(0);
+    });
+  });
+
+  describe('ScheduledRunRepository', () => {
+    let app;
+
+    beforeEach(() => {
+      app = seedApp();
+    });
+
+    function seedSchedule(appId, overrides = {}) {
+      return scheduledRunRepo.create({
+        app_id: appId,
+        name: 'Daily Smoke',
+        cron_expression: '0 6 * * *',
+        test_mode: 'smoke',
+        agents: '["healer"]',
+        ...overrides
+      });
+    }
+
+    it('create() generates UUID and returns record', () => {
+      const schedule = seedSchedule(app.id);
+      expect(schedule.id).toBeDefined();
+      expect(schedule.app_id).toBe(app.id);
+      expect(schedule.name).toBe('Daily Smoke');
+      expect(schedule.cron_expression).toBe('0 6 * * *');
+    });
+
+    it('getById() returns schedule or null', () => {
+      const schedule = seedSchedule(app.id);
+      expect(scheduledRunRepo.getById(schedule.id)).not.toBeNull();
+      expect(scheduledRunRepo.getById('nonexistent')).toBeNull();
+    });
+
+    it('getEnabled() returns only enabled schedules', () => {
+      seedSchedule(app.id, { enabled: 1 });
+      seedSchedule(app.id, { enabled: 0, name: 'Disabled' });
+      const enabled = scheduledRunRepo.getEnabled();
+      expect(enabled).toHaveLength(1);
+      expect(enabled[0].name).toBe('Daily Smoke');
+    });
+
+    it('getAll() returns all schedules ordered by created_at', () => {
+      seedSchedule(app.id, { name: 'First' });
+      seedSchedule(app.id, { name: 'Second' });
+      const all = scheduledRunRepo.getAll();
+      expect(all).toHaveLength(2);
+    });
+
+    it('getByApp() filters by app_id', () => {
+      const app2 = seedApp({ name: 'Other' });
+      seedSchedule(app.id);
+      seedSchedule(app2.id, { name: 'Other schedule' });
+      expect(scheduledRunRepo.getByApp(app.id)).toHaveLength(1);
+      expect(scheduledRunRepo.getByApp(app2.id)).toHaveLength(1);
+    });
+
+    it('updateLastRun() sets tracking fields', () => {
+      const schedule = seedSchedule(app.id);
+      const now = new Date().toISOString();
+      scheduledRunRepo.updateLastRun(schedule.id, {
+        last_run_at: now,
+        last_run_status: 'passed',
+        last_run_id: 'run-123'
+      });
+      const updated = scheduledRunRepo.getById(schedule.id);
+      expect(updated.last_run_at).toBe(now);
+      expect(updated.last_run_status).toBe('passed');
+      expect(updated.last_run_id).toBe('run-123');
+    });
+
+    it('setEnabled() toggles enabled flag', () => {
+      const schedule = seedSchedule(app.id);
+      expect(scheduledRunRepo.getById(schedule.id).enabled).toBe(1);
+      scheduledRunRepo.setEnabled(schedule.id, false);
+      expect(scheduledRunRepo.getById(schedule.id).enabled).toBe(0);
+      scheduledRunRepo.setEnabled(schedule.id, true);
+      expect(scheduledRunRepo.getById(schedule.id).enabled).toBe(1);
+    });
+
+    it('updateCron() changes cron expression', () => {
+      const schedule = seedSchedule(app.id);
+      scheduledRunRepo.updateCron(schedule.id, '0 */4 * * *');
+      const updated = scheduledRunRepo.getById(schedule.id);
+      expect(updated.cron_expression).toBe('0 */4 * * *');
+    });
+
+    it('delete() removes schedule', () => {
+      const schedule = seedSchedule(app.id);
+      scheduledRunRepo.delete(schedule.id);
+      expect(scheduledRunRepo.getById(schedule.id)).toBeNull();
+    });
+
+    it('defaults test_mode to smoke, environment to staging', () => {
+      const schedule = scheduledRunRepo.create({
+        app_id: app.id,
+        name: 'Minimal',
+        cron_expression: '0 0 * * *'
+      });
+      expect(schedule.test_mode).toBe('smoke');
+      expect(schedule.environment).toBe('staging');
+      expect(schedule.enabled).toBe(1);
+      expect(schedule.notify_on_complete).toBe(1);
     });
   });
 });

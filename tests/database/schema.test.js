@@ -20,16 +20,16 @@ describe('Initial Schema (Migration 001)', () => {
 
   const EXPECTED_TABLES = [
     'apps', 'test_runs', 'test_results', 'bugs',
-    'approvals', 'fixes', 'evidence_metadata'
+    'approvals', 'fixes', 'evidence_metadata', 'scheduled_runs'
   ];
 
-  it('creates all 7 tables plus schema_migrations', () => {
+  it('creates all 8 tables plus schema_migrations', () => {
     const tables = conn.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ).all().map(r => r.name);
 
     expect(tables).toEqual(expect.arrayContaining([...EXPECTED_TABLES, 'schema_migrations']));
-    expect(tables).toHaveLength(8);
+    expect(tables).toHaveLength(9);
   });
 
   it('creates all indexes', () => {
@@ -52,6 +52,8 @@ describe('Initial Schema (Migration 001)', () => {
       'idx_fixes_app',
       'idx_fixes_bug',
       'idx_fixes_status',
+      'idx_scheduled_runs_app',
+      'idx_scheduled_runs_enabled',
       'idx_test_results_agent',
       'idx_test_results_app',
       'idx_test_results_run',
@@ -148,6 +150,6 @@ describe('Initial Schema (Migration 001)', () => {
     const result = await migrator2.migrate();
 
     expect(result.applied).toEqual([]);
-    expect(result.current_version).toBe(1);
+    expect(result.current_version).toBe(2);
   });
 });

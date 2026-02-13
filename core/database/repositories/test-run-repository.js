@@ -31,6 +31,22 @@ class TestRunRepository extends BaseRepository {
     });
   }
 
+  /**
+   * Get test runs for an app since a given timestamp.
+   * Used by Scheduler.sendDailyDigest() to aggregate last 24h results.
+   *
+   * @param {string} appId - App ID to filter by
+   * @param {string} sinceIso - ISO timestamp lower bound (inclusive)
+   * @returns {TestRun[]}
+   */
+  getRunsSince(appId, sinceIso) {
+    return this._connection.db.prepare(
+      `SELECT * FROM test_runs
+       WHERE app_id = ? AND started_at >= ?
+       ORDER BY started_at DESC`
+    ).all(appId, sinceIso);
+  }
+
   getPassRate(appId, days = 30) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);

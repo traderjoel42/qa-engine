@@ -134,3 +134,42 @@
   - Mock evidence collector is defined locally in each test file (following existing pattern)
   - Spec's `createMockOrchestrator()` and `createTestDb()` will be created in-line in Steps 12-14 (scheduler/repository test files)
 - **Deviations:** Spec verification path `tests/mocks/playwright-page` doesn't exist — project uses `tests/helpers/mock-playwright.js` instead. No new directory created.
+
+---
+
+## Step 11: Create migration 002_scheduled_runs.sql
+
+- **Files created:** `core/database/migrations/002_scheduled_runs.sql`
+- **Status:** done
+- **Changes:**
+  - Created migration with `scheduled_runs` table (16 columns), 2 indexes (`idx_scheduled_runs_app`, `idx_scheduled_runs_enabled`)
+  - Updated `tests/database/schema.test.js`: table count 8→9, added new indexes in alphabetical order, migration version 1→2
+  - Verification: `PASS - scheduled_runs table created`
+- **Deviations:** None — implemented verbatim from spec
+
+---
+
+## Step 12: Implement ScheduledRunRepository
+
+- **Files created:** `core/database/repositories/scheduled-run-repository.js`
+- **Files modified:** `core/database/index.js`, `tests/database/repositories.test.js`
+- **Status:** done
+- **Changes:**
+  - Created `ScheduledRunRepository extends BaseRepository` with: `getEnabled()`, `getAll()`, `getByApp()`, `getById()`, `create()`, `updateLastRun()`, `setEnabled()`, `updateCron()`, `delete()`
+  - Registered as `scheduledRuns` in `createDatabase()` and module exports
+  - 10 tests: create (1), getById (1), getEnabled (1), getAll (1), getByApp (1), updateLastRun (1), setEnabled (1), updateCron (1), delete (1), defaults (1)
+- **Test count:** 10 tests passing
+- **Deviations:** Used `this._connection` instead of `this.connection` to match BaseRepository's internal field name
+
+---
+
+## Step 12b: Add getRunsSince() to TestRunRepository
+
+- **Files modified:** `core/database/repositories/test-run-repository.js`, `tests/database/repositories.test.js`
+- **Status:** done
+- **Changes:**
+  - Added `getRunsSince(appId, sinceIso)` method — queries test_runs where `app_id = ? AND started_at >= ?`, ordered DESC
+  - 4 tests: returns runs after timestamp (1), filters by app_id (1), empty array when no match (1), orders DESC (1)
+- **Test count:** 4 new tests (53 total in repositories.test.js)
+- **Regression check:** All 128 database tests passing (6 test suites)
+- **Deviations:** None — implemented verbatim from spec
