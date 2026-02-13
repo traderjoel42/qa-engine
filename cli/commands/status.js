@@ -20,7 +20,8 @@ module.exports = function statusCommand(program) {
         engine = await createEngine({ quiet: true });
 
         const limit = parseInt(options.limit, 10) || 10;
-        const runs = await engine.status({ limit });
+        const { activeRuns, recentRuns } = await engine.status({ limit });
+        const runs = [...activeRuns, ...recentRuns];
 
         if (runs.length === 0) {
           console.log('No test runs found.');

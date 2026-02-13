@@ -313,12 +313,15 @@ async function createEngine(overrides = {}) {
     },
 
     async status(options = {}) {
-      const limit = options.limit || 10;
-      const runs = db.testRuns.findMany(
+      const limit = options.limit || 20;
+      const allRuns = db.testRuns.findMany(
         {},
         { orderBy: { started_at: 'DESC' }, limit }
       );
-      return runs;
+      return {
+        activeRuns: allRuns.filter(r => r.status === 'running'),
+        recentRuns: allRuns.filter(r => r.status !== 'running').slice(0, 10)
+      };
     },
 
     async bugs(appId, options = {}) {
@@ -331,6 +334,18 @@ async function createEngine(overrides = {}) {
         { orderBy: { created_at: 'DESC' }, limit: options.limit || 20 }
       );
       return bugs;
+    },
+
+    async approve(approvalId) {
+      return approvalManager.handleResponse(`YES-${approvalId}`);
+    },
+
+    async reject(approvalId) {
+      return approvalManager.handleResponse(`NO-${approvalId}`);
+    },
+
+    async bugInfo(approvalId) {
+      return approvalManager.handleResponse(`INFO-${approvalId}`);
     },
 
     async shutdown() {

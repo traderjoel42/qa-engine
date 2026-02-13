@@ -11,7 +11,7 @@ const statusCommand = require('../../cli/commands/status');
 function createMockEngine(overrides = {}) {
   return {
     run: jest.fn().mockResolvedValue({}),
-    status: jest.fn().mockResolvedValue([]),
+    status: jest.fn().mockResolvedValue({ activeRuns: [], recentRuns: [] }),
     bugs: jest.fn().mockResolvedValue([]),
     shutdown: jest.fn().mockResolvedValue(undefined),
     ...overrides
@@ -63,9 +63,12 @@ describe('status command', () => {
 
   // Group 2: Output formatting
   test('prints run date, app, and status for each run', async () => {
-    mockEngine.status.mockResolvedValue([
-      { started_at: '2026-02-12T10:00:00Z', app_id: 'brainstormy', status: 'completed' }
-    ]);
+    mockEngine.status.mockResolvedValue({
+      activeRuns: [],
+      recentRuns: [
+        { started_at: '2026-02-12T10:00:00Z', app_id: 'brainstormy', status: 'completed' }
+      ]
+    });
 
     await runCommand();
 
@@ -75,14 +78,17 @@ describe('status command', () => {
   });
 
   test('parses JSON summary if stored as string', async () => {
-    mockEngine.status.mockResolvedValue([
-      {
-        started_at: '2026-02-12T10:00:00Z',
-        app_id: 'brainstormy',
-        status: 'completed',
-        summary: JSON.stringify({ passed: 3, failed: 1, total: 4 })
-      }
-    ]);
+    mockEngine.status.mockResolvedValue({
+      activeRuns: [],
+      recentRuns: [
+        {
+          started_at: '2026-02-12T10:00:00Z',
+          app_id: 'brainstormy',
+          status: 'completed',
+          summary: JSON.stringify({ passed: 3, failed: 1, total: 4 })
+        }
+      ]
+    });
 
     await runCommand();
 
@@ -92,18 +98,24 @@ describe('status command', () => {
   });
 
   test('handles runs without summary gracefully', async () => {
-    mockEngine.status.mockResolvedValue([
-      { started_at: '2026-02-12T10:00:00Z', app_id: 'brainstormy', status: 'running' }
-    ]);
+    mockEngine.status.mockResolvedValue({
+      activeRuns: [],
+      recentRuns: [
+        { started_at: '2026-02-12T10:00:00Z', app_id: 'brainstormy', status: 'running' }
+      ]
+    });
 
     await expect(runCommand()).resolves.not.toThrow();
   });
 
   // Group 3: Cleanup
   test('calls engine.shutdown() after displaying', async () => {
-    mockEngine.status.mockResolvedValue([
-      { started_at: '2026-02-12T10:00:00Z', app_id: 'brainstormy', status: 'completed' }
-    ]);
+    mockEngine.status.mockResolvedValue({
+      activeRuns: [],
+      recentRuns: [
+        { started_at: '2026-02-12T10:00:00Z', app_id: 'brainstormy', status: 'completed' }
+      ]
+    });
 
     await runCommand();
 

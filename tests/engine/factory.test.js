@@ -234,6 +234,121 @@ describe('createEngine', () => {
 
     await engine.shutdown();
   });
+
+  // Group 6: Enhanced status() return shape
+  test('status() returns { activeRuns, recentRuns } object', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+
+    const result = await engine.status();
+
+    expect(result).toHaveProperty('activeRuns');
+    expect(result).toHaveProperty('recentRuns');
+    expect(Array.isArray(result.activeRuns)).toBe(true);
+    expect(Array.isArray(result.recentRuns)).toBe(true);
+
+    await engine.shutdown();
+  });
+
+  test('status() accepts options.limit parameter', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+
+    const result = await engine.status({ limit: 5 });
+
+    expect(result.activeRuns).toBeDefined();
+    expect(result.recentRuns).toBeDefined();
+
+    await engine.shutdown();
+  });
+
+  // Group 7: approve/reject/bugInfo methods
+  test('engine exposes approve() method', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+
+    expect(typeof engine.approve).toBe('function');
+
+    await engine.shutdown();
+  });
+
+  test('engine exposes reject() method', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+
+    expect(typeof engine.reject).toBe('function');
+
+    await engine.shutdown();
+  });
+
+  test('engine exposes bugInfo() method', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+
+    expect(typeof engine.bugInfo).toBe('function');
+
+    await engine.shutdown();
+  });
+
+  test('approve() delegates to approvalManager.handleResponse with YES prefix', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+    const spy = jest.spyOn(engine._internals.approvalManager, 'handleResponse')
+      .mockResolvedValue({ action: 'approved', approval_id: 'ABC-247' });
+
+    await engine.approve('ABC-247');
+
+    expect(spy).toHaveBeenCalledWith('YES-ABC-247');
+
+    spy.mockRestore();
+    await engine.shutdown();
+  });
+
+  test('reject() delegates to approvalManager.handleResponse with NO prefix', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+    const spy = jest.spyOn(engine._internals.approvalManager, 'handleResponse')
+      .mockResolvedValue({ action: 'rejected', approval_id: 'ABC-247' });
+
+    await engine.reject('ABC-247');
+
+    expect(spy).toHaveBeenCalledWith('NO-ABC-247');
+
+    spy.mockRestore();
+    await engine.shutdown();
+  });
+
+  test('bugInfo() delegates to approvalManager.handleResponse with INFO prefix', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+    const spy = jest.spyOn(engine._internals.approvalManager, 'handleResponse')
+      .mockResolvedValue({ action: 'info', approval_id: 'ABC-247', bug: {} });
+
+    await engine.bugInfo('ABC-247');
+
+    expect(spy).toHaveBeenCalledWith('INFO-ABC-247');
+
+    spy.mockRestore();
+    await engine.shutdown();
+  });
+
+  test('approve() returns handleResponse result envelope', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+    const expected = { action: 'approved', approval_id: 'XYZ-100', message: 'Fix approved' };
+    jest.spyOn(engine._internals.approvalManager, 'handleResponse')
+      .mockResolvedValue(expected);
+
+    const result = await engine.approve('XYZ-100');
+
+    expect(result).toEqual(expected);
+
+    await engine.shutdown();
+  });
+
+  test('approve() returns error envelope when approval not found', async () => {
+    const engine = await createEngine({ config: minimalConfig, quiet: true });
+    const expected = { action: 'error', message: 'Approval XYZ-999 not found', approval_id: 'XYZ-999' };
+    jest.spyOn(engine._internals.approvalManager, 'handleResponse')
+      .mockResolvedValue(expected);
+
+    const result = await engine.approve('XYZ-999');
+
+    expect(result.action).toBe('error');
+
+    await engine.shutdown();
+  });
 });
 
 describe('ConsoleNotificationAdapter', () => {
