@@ -1,11 +1,14 @@
 # QA Engine: Mac Mini Environment Setup & First-Run Validation
 
-**Version:** 2.0  
+**Version:** 3.0  
 **Date:** February 13, 2026  
 **Phase:** 2, Task 1  
 **Prerequisite:** Phase 1 complete — run `npm test` on Mac Mini to confirm actual passing count  
 **Related:** qa-engine-01 through 05, brainstormy-connector-and-scheduling-spec  
-**Revision Note:** v2.0 incorporates all 22 findings from Claude Code's feasibility evaluation against the actual qa-engine codebase. Every path, env var name, config key, CLI flag, and script reference has been reconciled with the implementation.
+**Revision History:**
+- v1.0: Initial spec (written against design docs, not codebase)
+- v2.0: Reconciled all naming/path/config mismatches with actual codebase (22 findings)
+- v3.0: Addresses execution pipeline gaps found in v2.0 deep evaluation (12 findings) — CLI browser lifecycle, scenario loading, scenario format compatibility, auth credential nesting, and `.gitignore` gaps
 
 ---
 
@@ -41,17 +44,17 @@ Get a single successful smoke test run against the real Brainstormy staging envi
 
 **Rationale:** Render free/starter tier services spin down after inactivity. The first page load can take 30–60 seconds while the service container restarts. The existing 30-second navigation timeout in `connector.config.timeouts.navigation` will fail on cold starts, creating false negatives that undermine trust in the system before it's even proven.
 
-**Implementation:** Add a `warmUp()` method to BrainstormyConnector (or BaseConnector) that performs an HTTP GET against the app's `baseUrl` with a 120-second timeout, called from `initialize()` before any browser navigation. This is a small code change (~15 lines) to an existing file. Also increase `connector.config.timeouts.navigation` from `30000` to `90000` in the app config.
+**Implementation:** Add a `warmUp()` method to BrainstormyConnector (or BaseConnector) that performs an HTTP GET against the app's `baseUrl` with a 120-second timeout, called from `initialize()` before any browser navigation. Also increase `connector.config.timeouts.navigation` from `30000` to `90000` in the app config.
 
-**Impact:** Requires a code change to the connector (see Step 4a). After the warm-up request wakes the service, subsequent requests should respond within normal timeframes.
+**Impact:** Requires a code change to the connector (see Change A).
 
 ### D3: Minimal First Run — Healer Agent, Smoke Mode Only
 
 **Decision:** The first-run validation uses only the Healer agent in `smoke` mode. No Sentinel, Librarian, or Quinn agents.
 
-**Rationale:** The goal is to prove the plumbing works: connector authenticates, browser actions execute, evidence is captured, results are stored. The existing smoke test scenarios in `apps/brainstormy/scenarios/smoke-tests.json` (IDs: `smoke-01-login`, `smoke-02-navigate-project`, etc.) are the right starting point. Running memory persistence tests (Sentinel) or edge cases (Quinn) introduces variables that could obscure infrastructure problems.
+**Rationale:** The goal is to prove the plumbing works: connector authenticates, browser actions execute, evidence is captured, results are stored. The existing smoke test scenarios in `apps/brainstormy/scenarios/smoke-tests.json` are the right starting point. Running memory persistence tests (Sentinel) or edge cases (Quinn) introduces variables that could obscure infrastructure problems.
 
-**Impact:** The CLI command for first run: `node cli/index.js test --app brainstormy --agent healer --mode smoke`. Uses the existing `--mode` flag — no new CLI flags needed for scenario selection.
+**Impact:** The CLI command for first run: `node cli/index.js test --app brainstormy --agent healer --mode smoke`. Uses the existing `--mode` flag.
 
 ### D4: Skip Bug Detection and Auto-Fix for First Run
 
@@ -59,15 +62,13 @@ Get a single successful smoke test run against the real Brainstormy staging envi
 
 **Rationale:** The first run will almost certainly encounter selector mismatches, timing issues, or unexpected UI states. These are setup calibration issues, not bugs. Routing them through bug detection would create noise in Linear and potentially trigger approval workflows before the system is proven.
 
-**Implementation:** This requires a small code change to `cli/commands/test.js` to accept the flag and pass it through to `TestOrchestrator.run()` options. The orchestrator already has conditional bug detection logic — this just adds a way to disable it from the CLI. Estimated: ~20 lines across 2 files.
-
-**Impact:** Requires a code change (see Step 4b).
+**Impact:** Requires a code change (see Change B). The flag must thread through CLI → `engine.run()` → orchestrator → `_runPostHooks()` → FailureHandler.
 
 ### D5: WhatsApp Notification as Standalone Verification
 
 **Decision:** Test WhatsApp notification delivery as a separate manual step using a standalone script, not as part of the smoke test flow and not via a CLI subcommand.
 
-**Rationale:** The smoke test validates browser automation + evidence + storage. WhatsApp validates Twilio credentials + message delivery. Coupling them means a Twilio misconfiguration could block proving that browser automation works. The CLI currently has `test`, `status`, and `bugs` commands but no `notify` command — adding one is out of scope for this task. A standalone script is faster to create and serves the verification purpose.
+**Rationale:** The smoke test validates browser automation + evidence + storage. WhatsApp validates Twilio credentials + message delivery. Coupling them means a Twilio misconfiguration could block proving that browser automation works. The CLI currently has `test`, `status`, and `bugs` commands but no `notify` command — adding one is out of scope for this task.
 
 **Impact:** Create `scripts/verify-whatsapp.js` using the correct env var names from `core/config.js`.
 
@@ -75,27 +76,29 @@ Get a single successful smoke test run against the real Brainstormy staging envi
 
 **Decision:** Use the database path defined in `core/config.js`: `./data/qa-engine.db` (configurable via `QA_ENGINE_DB_PATH` env var).
 
-**Rationale:** The Phase 1 implementation chose `data/qa-engine.db` as the database location, not `database/qa.db` as the original design specs proposed. The migration system is built into the engine initialization via `createDatabase()` in `core/database/index.js` — there is no standalone `scripts/migrate.js`. Aligning with the actual codebase avoids confusion.
+**Rationale:** The Phase 1 implementation chose `data/qa-engine.db` as the database location, not `database/qa.db` as the original design specs proposed. The migration system is built into the engine initialization via `createDatabase()` in `core/database/index.js` — there is no standalone migration script. The `data/` directory and database file are created automatically on first engine run.
 
-**Impact:** All SQLite commands in this spec use `data/qa-engine.db`. Database initialization happens automatically when the engine first runs, not via a manual migration script. The `data/` directory is created by the engine if it doesn't exist.
+**Impact:** All SQLite commands in this spec use `data/qa-engine.db`. No manual migration step needed.
 
 ### D7: App Config Loads from JSON Files, Not Database
 
 **Decision:** Do not insert app records into the SQLite `apps` table manually. The system loads app configuration from `apps/brainstormy/app.config.json` at runtime via `loadAppConfig()`.
 
-**Rationale:** The Phase 1 implementation uses JSON files as the source of truth for app configuration. The `apps` table in SQLite is populated or referenced by the engine at runtime, not pre-seeded. Creating a manual `INSERT` would bypass the app loader and could produce schema mismatches.
+**Rationale:** The Phase 1 implementation uses JSON files as the source of truth for app configuration. The `apps` table in SQLite is populated or referenced by the engine at runtime, not pre-seeded.
 
-**Impact:** Step 5 from v1.0 (manual database initialization and app record insertion) is removed. The database is initialized automatically on first engine run.
+**Impact:** No manual database initialization step. The database is created automatically on first engine run.
 
 ---
 
 ## Code Changes Required Before First Run
 
-The evaluation identified two small capabilities that need to be added to the codebase before the first-run steps can execute. These are surgical additions, not architectural changes.
+The v2.0 evaluation found that the execution pipeline (CLI → engine → orchestrator → agent → connector) has several gaps that must be closed before the smoke test command can reach the staging server. These are listed from most critical to least, with estimated effort revised based on the v2.0 deep-read evaluation.
+
+**Total estimated code changes: ~150–220 lines across 6–8 files.**
 
 ### Change A: Warm-Up Method in Connector
 
-**File to modify:** `connectors/brainstormy/connector.js` (or `connectors/base-connector.js` if preferred)
+**File to modify:** `connectors/brainstormy/connector.js` (or `connectors/base-connector.js`)
 
 **What:** Add a `warmUp()` method that performs an HTTP GET against the app's base URL to wake up Render services before browser automation begins. Call it from `initialize()`.
 
@@ -103,25 +106,34 @@ The evaluation identified two small capabilities that need to be added to the co
 /**
  * Wake up the target service if it's been idle (Render cold start).
  * Performs a plain HTTP GET with generous timeout before browser nav.
+ *
+ * NOTE: The 'timeout' option on https.get() sets the socket inactivity timeout,
+ * not a hard deadline. For Render cold starts where the TCP connection succeeds
+ * but the HTTP response takes 30-60s, this works because the socket remains
+ * active during the server startup. If the connection itself hangs (no TCP
+ * handshake), we add an explicit setTimeout as a hard deadline.
  */
 async warmUp() {
   const url = this.app.baseUrl || this.app.environments?.staging?.baseUrl;
-  const timeout = this.app.connector?.config?.timeouts?.warmUp || 120000;
-  
-  console.log(`Warming up ${url} (timeout: ${timeout / 1000}s)...`);
+  const timeoutMs = this.getTimeout('warmUp') || 120000;
+
+  console.log(`Warming up ${url} (timeout: ${timeoutMs / 1000}s)...`);
   const start = Date.now();
-  
+
   try {
     const https = require('https');
     await new Promise((resolve, reject) => {
-      const req = https.get(url, { timeout }, (res) => {
+      const req = https.get(url, { timeout: timeoutMs }, (res) => {
         res.resume(); // Drain response
         resolve(res.statusCode);
       });
       req.on('timeout', () => { req.destroy(); reject(new Error('Warm-up timeout')); });
       req.on('error', reject);
+
+      // Hard deadline fallback in case socket timeout doesn't fire
+      setTimeout(() => { req.destroy(); reject(new Error('Warm-up hard deadline')); }, timeoutMs + 5000);
     });
-    
+
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);
     console.log(`  Service ready (${elapsed}s)`);
   } catch (err) {
@@ -132,27 +144,222 @@ async warmUp() {
 
 Then in `initialize()`, call `await this.warmUp()` before the first `page.goto()`.
 
-**Estimated effort:** ~20 lines added to one file.
+**Estimated effort:** ~25 lines in one file.
 
 ### Change B: --skip-bug-detection CLI Flag
 
-**Files to modify:** `cli/commands/test.js`, `core/engine/test-orchestrator.js`
+**Files to modify:** `cli/commands/test.js`, `core/engine/factory.js` (engine.run()), `core/engine/test-orchestrator.js` (_runPostHooks())
 
-**What:** Add `--skip-bug-detection` option to the test command. Pass it through as `options.skipBugDetection` to the orchestrator, which skips the Bug Detector invocation when the flag is true.
+**What:** Add `--skip-bug-detection` option to the test command. The flag must flow through the full call chain:
+
+1. `cli/commands/test.js` — accept the flag, include in options passed to `engine.run()`
+2. `core/engine/factory.js` `engine.run()` — pass `skipBugDetection` through to orchestrator options
+3. `core/engine/test-orchestrator.js` `_runPostHooks()` — check the flag before calling `this._failureHandler.handle(result)`
 
 In `cli/commands/test.js`:
 ```javascript
 .option('--skip-bug-detection', 'Disable bug detection and Linear integration')
 ```
 
-In `TestOrchestrator.run()` (or wherever bug detection is triggered):
+In `_runPostHooks()` (or equivalent failure handling path):
 ```javascript
-if (testResult.status === 'failed' && !options.skipBugDetection) {
-  await this.bugDetector.detectAndReport(testResult);
+if (result.status === 'failed' && !this._options.skipBugDetection) {
+  await this._failureHandler.handle(result);
 }
 ```
 
-**Estimated effort:** ~10 lines across 2 files.
+**Estimated effort:** ~25 lines across 3 files.
+
+### Change C: Browser Lifecycle in CLI Test Command (CRITICAL)
+
+**Files to modify:** `cli/commands/test.js`, potentially `core/engine/factory.js`
+
+**What:** The `TestOrchestrator._executeRun()` requires `options.page` (a Playwright Page instance) and `options.evidenceCollector` (an EvidenceCollector instance). Currently, `cli/commands/test.js` passes only `{ mode, agents }` to `engine.run()`, and nobody in the call chain creates a browser, page, or evidence collector. The orchestrator will throw `ConfigurationError: 'options.page (Playwright page instance) is required'` immediately.
+
+The CLI test command (or the `engine.run()` wrapper in `factory.js`) must:
+
+1. Launch a Playwright Chromium browser
+2. Create a browser context and page
+3. Create an EvidenceCollector instance
+4. Pass both into the orchestrator options
+5. Clean up the browser after the run completes (success or failure)
+
+**Implementation approach — add to `engine.run()` in `factory.js` so any caller benefits:**
+
+```javascript
+async run(appId, options = {}) {
+  // ... existing setup ...
+
+  // Create browser and evidence collector if not provided
+  let browser = null;
+  let manageBrowser = false;
+
+  if (!options.page) {
+    const { chromium } = require('playwright');
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 }
+    });
+    options.page = await context.newPage();
+    manageBrowser = true;
+  }
+
+  if (!options.evidenceCollector) {
+    const EvidenceCollector = require('./engine/evidence-collector');
+    options.evidenceCollector = new EvidenceCollector({
+      basePath: `evidence/${appId}`,
+      page: options.page
+    });
+  }
+
+  try {
+    return await this._orchestrator.run(appId, options);
+  } finally {
+    if (manageBrowser && browser) {
+      await browser.close();
+    }
+  }
+}
+```
+
+**Estimated effort:** ~40–50 lines in `core/engine/factory.js`. May also need to verify EvidenceCollector constructor accepts these args (check actual constructor signature and adapt).
+
+### Change D: Scenario Loading into Agent Config (CRITICAL)
+
+**Files to modify:** `apps/brainstormy/app.config.json`, `core/engine/factory.js` (agent registration)
+
+**What:** When agents are registered in `factory.js:301-303`, the agent config comes from `appConfig.agents[agentId]`. Currently `app.config.json` has no `agents` key, so agents get `{}` (empty config), and `BaseAgent.getScenarios()` throws `ConfigurationError: No scenarios configured` because `this.config.scenarios` is undefined.
+
+The scenarios exist in `apps/brainstormy/scenarios/smoke-tests.json` but nothing loads them into agent config. Two things must happen:
+
+**Part 1 — Add `agents` block to `app.config.json`:**
+```json
+{
+  "agents": {
+    "healer": {
+      "scenarioFiles": ["scenarios/smoke-tests.json"]
+    }
+  }
+}
+```
+
+**Part 2 — Add scenario file loading to the engine:**
+
+In `factory.js`, when registering agents, resolve `scenarioFiles` to actual scenario data:
+
+```javascript
+// In the agent registration loop
+const agentConfig = appConfig.agents?.[agentId] || {};
+
+// Load scenarios from referenced files
+if (agentConfig.scenarioFiles && Array.isArray(agentConfig.scenarioFiles)) {
+  const path = require('path');
+  const fs = require('fs');
+  agentConfig.scenarios = [];
+
+  for (const scenarioFile of agentConfig.scenarioFiles) {
+    const filePath = path.resolve(`apps/${appId}`, scenarioFile);
+    if (fs.existsSync(filePath)) {
+      const loaded = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      // Handle both single scenario and array of scenarios
+      const scenarios = Array.isArray(loaded) ? loaded : (loaded.scenarios || [loaded]);
+      agentConfig.scenarios.push(...scenarios);
+    }
+  }
+}
+
+orchestrator.registerAgent(agentId, agentRegistry[agentId], agentConfig);
+```
+
+**Estimated effort:** ~30–40 lines across 2 files (config + factory).
+
+### Change E: Scenario Format Compatibility (CRITICAL)
+
+**File to modify:** `apps/brainstormy/scenarios/smoke-tests.json`
+
+**What:** The current `smoke-tests.json` mixes `action` and `assert` entries in a single `steps` array:
+```json
+{ "action": "navigate", "params": { "path": "/" } },
+{ "assert": "selector_visible", "selector": "userMenu", "message": "..." }
+```
+
+But `BaseAgent.executeStep()` always calls `connector.performAction(step.action, ...)`. For `assert` entries, `step.action` is `undefined`, which calls `performAction(undefined, {})` and throws `"Action 'undefined' is not supported"`.
+
+Additionally, `BaseAgent.runScenario()` evaluates assertions from `scenario.assertions || []` — a separate top-level array, not from inline `steps`. And the assertion types in the scenario (`selector_visible`, `element_count_gte`, `result_count_gte`) don't match what BaseAgent supports (`state_exists`, `state_equals`, `state_contains`, `state_truthy`, `url_contains`, `url_matches`, `element_exists`, `element_text_contains`, `response_contains`, `step_succeeded`).
+
+**Resolution — rewrite `smoke-tests.json` to match the BaseAgent contract:**
+
+The scenarios must use:
+- `steps` array containing only action entries (no inline asserts)
+- `assertions` array at the scenario level using supported assertion types
+
+```json
+[
+  {
+    "id": "smoke-01-login",
+    "name": "Login and Dashboard Load",
+    "description": "Verify Clerk authentication and dashboard render",
+    "mode": "smoke",
+    "steps": [
+      {
+        "action": "navigate",
+        "params": { "path": "/" }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "element_exists",
+        "selector": "userMenu",
+        "message": "User menu should be visible after login"
+      },
+      {
+        "type": "url_contains",
+        "value": "/",
+        "message": "Should be on the dashboard"
+      }
+    ]
+  },
+  {
+    "id": "smoke-02-navigate-project",
+    "name": "Navigate to Test Project",
+    "description": "Verify project page loads and displays content",
+    "mode": "smoke",
+    "steps": [
+      {
+        "action": "navigate",
+        "params": { "path": "/projects" }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "element_exists",
+        "selector": "newProjectButton",
+        "message": "New project button should be visible on projects page"
+      }
+    ]
+  }
+]
+```
+
+**Important note about authentication:** The connector's `initialize()` method performs Clerk authentication automatically before any agents run. By the time `smoke-01-login` executes, the user is already logged in. The scenario's purpose is to verify the authenticated state is correct (userMenu visible, correct URL), not to perform the login itself. The scenario name is kept as "Login and Dashboard Load" for clarity about what's being validated, but the login action is handled by the connector lifecycle.
+
+**Estimated effort:** Rewrite the JSON file (~30 lines), no code changes needed if BaseAgent's assertion types are sufficient. If `element_exists` doesn't resolve selector keys from the config (e.g., `userMenu` → `[data-testid='user-menu']`), a small helper in BaseAgent may be needed (~10 lines).
+
+### Change F: .gitignore Update
+
+**File to modify:** `.gitignore`
+
+**What:** The current `.gitignore` has `database/*.db` but the default database path is `data/qa-engine.db`. The `data/` directory is not gitignored, so the database could be accidentally committed.
+
+**Add to `.gitignore`:**
+```
+# QA Engine database
+data/*.db
+data/*.db-journal
+data/*.db-wal
+```
+
+**Estimated effort:** 3 lines.
 
 ---
 
@@ -215,7 +422,7 @@ npm test
 # Record the actual passing count — the spec no longer assumes a specific number
 ```
 
-**Notes:** If the test suite fails, STOP. Fix test failures before proceeding. Record the actual test count for the success criteria checklist — Phase 1 may have added tests since the original "83 tests" claim.
+**Notes:** If the test suite fails, STOP. Fix test failures before proceeding. Record the actual test count for the success criteria checklist.
 
 ---
 
@@ -253,11 +460,6 @@ ANTHROPIC_API_KEY=<Anthropic API key>
 LINEAR_API_KEY=<Linear API key>
 ```
 
-**Key differences from v1.0 spec:**
-- `TWILIO_FROM_NUMBER` (not `TWILIO_WHATSAPP_FROM`) — matches `core/config.js`
-- `QA_ENGINE_NOTIFICATION_RECIPIENTS` (not `WHATSAPP_DEFAULT_RECIPIENT`) — matches `core/config.js`, comma-separated
-- Removed `QA_ENGINE_ENV=staging` — no code reads this variable
-
 **Validation:**
 ```bash
 # Verify .env is loaded (from repo root)
@@ -279,7 +481,7 @@ node -e "require('dotenv').config(); \
 
 ### Step 4: Update app.config.json for Real Staging
 
-**What:** Update the Brainstormy app configuration to use the actual staging URL and test account. The config structure must match what `loadAppConfig()` and the BrainstormyConnector expect.
+**What:** Update the Brainstormy app configuration to use the actual staging URL and test account. The config structure must match what `loadAppConfig()` (which requires `id`, not `app_id`) and the BrainstormyConnector expect.
 
 **File:** `apps/brainstormy/app.config.json`
 
@@ -287,7 +489,7 @@ Update the following fields in the existing config structure (do not replace the
 
 ```json
 {
-  "app_id": "brainstormy",
+  "id": "brainstormy",
   "name": "Brainstormy",
   "type": "ai-chat-app",
   "baseUrl": "https://brainstormy-frontend-staging.onrender.com",
@@ -300,13 +502,14 @@ Update the following fields in the existing config structure (do not replace the
 
   "connector": {
     "type": "brainstormy",
-    "base": "ai-chat-app",
     "config": {
       "auth": {
         "type": "email_password",
         "required": true,
-        "email": "qa-automation@brainstormy.co",
-        "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
+        "credentials": {
+          "email": "qa-automation@brainstormy.co",
+          "passwordEnv": "BRAINSTORMY_TEST_PASSWORD"
+        }
       },
       "selectors": {
         "clerkEmailInput": "[name='emailAddress'], [name='email'], input[type='email']",
@@ -326,88 +529,130 @@ Update the following fields in the existing config structure (do not replace the
         "navigation": 90000,
         "aiResponse": 90000,
         "bibleGeneration": 120000,
+        "clerkAuth": 30000,
         "warmUp": 120000
       },
       "testProjectName": "[QA] Smoke Test Project"
+    }
+  },
+
+  "agents": {
+    "healer": {
+      "scenarioFiles": ["scenarios/smoke-tests.json"]
     }
   }
 }
 ```
 
-**Key differences from v1.0 spec (aligned with actual codebase):**
-- `baseUrl` (not `url`) at top level and in `environments.staging`
-- `connector.config.auth.passwordEnv` (not `credentials.password_env`)
-- `connector.config.selectors.clerkEmailInput` (not `config.selectors.login_email`)
-- `connector.config.timeouts` (not top-level `config.timeouts`)
-- `connector.config.testProjectName` (not `test_data.smoke_test_project_id`)
-- Added fallback selectors for Clerk inputs (comma-separated) since actual Clerk UI may differ from assumed `data-testid` values
-- `warmUp` timeout added to existing timeouts object
-- `navigation` increased from `30000` to `90000` for Render cold starts
+**Key changes (aligned with codebase — addressing v2.0 eval findings):**
+- `"id"` (not `"app_id"`) — `core/app-loader.js:53` requires `config.id`
+- `"credentials": { "email": ..., "passwordEnv": ... }` nested under `auth` — `connectors/brainstormy/connector.js:108-111` reads `auth.credentials.email` and `auth.credentials.passwordEnv`
+- `"clerkAuth": 30000` retained in timeouts — connector's `authenticate()` calls `this.getTimeout('clerkAuth')`
+- `"base": "ai-chat-app"` removed from connector — ConnectorFactory only reads `connector.type`, `base` is ignored
+- `"agents"` block added — required for scenario loading (see Change D); without this, agents get `{}` and throw `No scenarios configured`
+- Fallback selectors for Clerk inputs (comma-separated) since actual Clerk UI may differ from assumed `data-testid` values
+- `warmUp` timeout added, `navigation` increased from `30000` to `90000` for Render cold starts
 
 **Validation:**
 ```bash
 # Verify the config is valid JSON and key fields are correct
 node -e "const c = require('./apps/brainstormy/app.config.json'); \
-  console.log('App:', c.name); \
+  console.log('App ID:', c.id); \
   console.log('URL:', c.baseUrl); \
-  console.log('Auth email:', c.connector.config.auth.email); \
-  console.log('Nav timeout:', c.connector.config.timeouts.navigation);"
+  console.log('Auth email:', c.connector.config.auth.credentials.email); \
+  console.log('Nav timeout:', c.connector.config.timeouts.navigation); \
+  console.log('ClerkAuth timeout:', c.connector.config.timeouts.clerkAuth); \
+  console.log('Healer scenarios:', c.agents?.healer?.scenarioFiles);"
 # Expected:
-#   App: Brainstormy
+#   App ID: brainstormy
 #   URL: https://brainstormy-frontend-staging.onrender.com
 #   Auth email: qa-automation@brainstormy.co
 #   Nav timeout: 90000
+#   ClerkAuth timeout: 30000
+#   Healer scenarios: [ 'scenarios/smoke-tests.json' ]
 ```
 
 ---
 
-### Step 4a: Implement Warm-Up in Connector (Code Change)
+### Step 4a: Update .gitignore (Change F)
 
-**What:** Add the `warmUp()` method to BrainstormyConnector (or BaseConnector) as described in "Code Changes Required" above, and call it from `initialize()`.
+**What:** Ensure the SQLite database at `data/qa-engine.db` won't be accidentally committed.
 
-**Validation:**
+**Commands:**
 ```bash
-# Run unit tests to confirm no regressions
+# Check current .gitignore coverage
+grep -E 'data/' .gitignore
+
+# If data/*.db is not covered, add it:
+echo -e "\n# QA Engine database\ndata/*.db\ndata/*.db-journal\ndata/*.db-wal" >> .gitignore
+
+git add .gitignore
+git commit -m "Add data/*.db to .gitignore for QA Engine database"
+```
+
+---
+
+### Step 4b: Implement Code Changes A–E
+
+**What:** Implement all code changes described in the "Code Changes Required" section. These should be done in order since they build on each other.
+
+**Order of implementation:**
+
+1. **Change F** (.gitignore) — already done in Step 4a
+2. **Change A** (warmUp in connector) — standalone, no dependencies
+3. **Change C** (browser lifecycle in engine.run) — **most critical**, unblocks the entire pipeline
+4. **Change D** (scenario file loading in factory.js) — unblocks agent execution
+5. **Change E** (rewrite smoke-tests.json) — unblocks scenario execution
+6. **Change B** (--skip-bug-detection flag) — prevents noise from expected failures
+
+**Validation after each change:**
+```bash
+# After each change, run the test suite
 npm test
+# Confirm no regressions
+```
 
-# Verify the warm-up method exists
+**Validation after all changes:**
+```bash
+# Verify warm-up method exists
 node -e "const C = require('./connectors/brainstormy/connector'); \
-  console.log('warmUp method:', typeof C.prototype.warmUp === 'function' ? 'EXISTS' : 'MISSING')"
-```
+  console.log('warmUp:', typeof C.prototype.warmUp === 'function' ? 'EXISTS' : 'MISSING')"
 
-**Commit:**
-```bash
-git add connectors/
-git commit -m "Add warmUp() to connector for Render cold-start handling"
-```
-
----
-
-### Step 4b: Implement --skip-bug-detection CLI Flag (Code Change)
-
-**What:** Add `--skip-bug-detection` option to the `test` CLI command as described in "Code Changes Required" above.
-
-**Validation:**
-```bash
-# Verify the flag is recognized
+# Verify --skip-bug-detection flag is recognized
 node cli/index.js test --help
 # Should list --skip-bug-detection in the options
 
-# Run unit tests to confirm no regressions
-npm test
+# Verify scenario loading works (dry run — will fail to connect but should get past config loading)
+node -e "
+  const config = require('./apps/brainstormy/app.config.json');
+  const path = require('path');
+  const fs = require('fs');
+  const agentConfig = config.agents.healer;
+  const scenarios = [];
+  for (const f of agentConfig.scenarioFiles) {
+    const filePath = path.resolve('apps/brainstormy', f);
+    const loaded = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const s = Array.isArray(loaded) ? loaded : (loaded.scenarios || [loaded]);
+    scenarios.push(...s);
+  }
+  console.log('Scenarios loaded:', scenarios.length);
+  scenarios.forEach(s => console.log('  -', s.id, ':', s.name));
+"
+# Expected: lists smoke-01-login, smoke-02-navigate-project, etc.
 ```
 
-**Commit:**
+**Commit all changes together:**
 ```bash
-git add cli/ core/
-git commit -m "Add --skip-bug-detection flag to CLI test command"
+git add -A
+git commit -m "Bridge CLI-to-staging pipeline: browser lifecycle, scenario loading, format compat, warm-up, skip-bug-detection"
+git push
 ```
 
 ---
 
 ### Step 5: Validate Staging is Reachable
 
-**What:** Confirm the staging environment is up and responding before attempting browser automation. This handles the Render cold-start scenario explicitly.
+**What:** Confirm the staging environment is up and responding before attempting browser automation.
 
 **Commands:**
 ```bash
@@ -494,9 +739,9 @@ node scripts/verify-staging.js
 /**
  * Verify QA test account can authenticate against staging.
  * Opens a real browser, navigates to staging, performs Clerk login.
- * 
- * Reads config from the actual app.config.json structure
- * (connector.config.selectors, connector.config.auth, etc.)
+ *
+ * Reads config from the actual app.config.json structure:
+ *   connector.config.selectors, connector.config.auth.credentials, etc.
  */
 
 require('dotenv').config();
@@ -505,11 +750,11 @@ const config = require('../apps/brainstormy/app.config.json');
 
 const stagingUrl = config.baseUrl;
 const connectorConfig = config.connector.config;
-const email = connectorConfig.auth.email;
-const password = process.env[connectorConfig.auth.passwordEnv];
+const email = connectorConfig.auth.credentials.email;
+const password = process.env[connectorConfig.auth.credentials.passwordEnv];
 
 if (!password) {
-  console.error(`❌ ${connectorConfig.auth.passwordEnv} not set in .env`);
+  console.error(`❌ ${connectorConfig.auth.credentials.passwordEnv} not set in .env`);
   process.exit(1);
 }
 
@@ -691,12 +936,18 @@ node -e "const c = require('./apps/brainstormy/app.config.json'); \
 
 **What:** Execute the Healer agent's smoke tests through the CLI against real staging. This is the milestone — the first real test run.
 
-**The existing smoke scenarios in `apps/brainstormy/scenarios/smoke-tests.json` contain:**
-- `smoke-01-login` — Authenticate and verify login
-- `smoke-02-navigate-project` — Navigate to a project page
-- (and potentially others added during Phase 1)
+**How the execution pipeline works (for debugging context):**
 
-These use the connector's existing `performAction()` vocabulary (`authenticate`, `createProject`, `navigateToStory`, etc.) and do not need to be rewritten.
+1. `cli/commands/test.js` parses flags, calls `engine.run('brainstormy', options)`
+2. `engine.run()` **(Change C)** launches Playwright browser, creates page + EvidenceCollector
+3. `engine.run()` calls `loadAppConfig('brainstormy')` which reads `app.config.json` (requires `id` field)
+4. `engine.run()` registers agents with scenario data **(Change D)** loaded from `scenarioFiles`
+5. Orchestrator calls `connector.initialize()` which performs Clerk auth automatically, then calls `warmUp()` **(Change A)**
+6. Healer agent runs scenarios from `smoke-tests.json` **(Change E)** — actions via connector, then evaluates assertions
+7. If a test fails and `--skip-bug-detection` **(Change B)** is set, FailureHandler is skipped
+8. `engine.run()` closes the browser in a `finally` block
+
+**Important note about authentication:** The connector's `initialize()` handles Clerk login before any agent scenarios execute. The `smoke-01-login` scenario verifies the post-auth state (userMenu visible) — it does not perform the login itself. If authentication fails, it will fail at the connector level with a clear error, not inside a scenario step.
 
 **Run command:**
 ```bash
@@ -713,10 +964,9 @@ Target:  https://brainstormy-frontend-staging.onrender.com
 ═══════════════════════════════════════════
 
 Warming up service...                        ✅ (34.2s)
-[smoke-01-login] Authenticating...           ✅ (3.1s)
+Authenticating (Clerk)...                    ✅ (3.1s)
 [smoke-01-login] Verifying auth state...     ✅ (0.8s)
 [smoke-02-navigate-project] Navigating...    ✅ (2.1s)
-[smoke-02-navigate-project] Verifying...     ✅ (0.5s)
 
 ═══════════════════════════════════════════
 RESULT: PASSED
@@ -765,7 +1015,7 @@ sqlite3 data/qa-engine.db ".tables"
 /**
  * Send a test WhatsApp notification to verify Twilio configuration.
  * Standalone — does not depend on test run infrastructure.
- * 
+ *
  * Uses env var names matching core/config.js:
  *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER,
  *   QA_ENGINE_NOTIFICATION_RECIPIENTS
@@ -897,17 +1147,24 @@ All items must be checked before this task is complete:
 - [ ] `.env` file created with all required variables (correct names per `core/config.js`)
 - [ ] `.env` is in `.gitignore`
 
-### Code Changes
-- [ ] `warmUp()` method added to connector, called from `initialize()`
-- [ ] `--skip-bug-detection` flag added to CLI `test` command
+### Code Changes (~150–220 lines across 6–8 files)
+- [ ] Change A: `warmUp()` method added to connector with hard deadline fallback, called from `initialize()`
+- [ ] Change B: `--skip-bug-detection` flag threaded through CLI → `engine.run()` → orchestrator `_runPostHooks()` → FailureHandler
+- [ ] Change C: Browser lifecycle (launch, page, EvidenceCollector, teardown) added to `engine.run()` in `factory.js`
+- [ ] Change D: Scenario file loading added to agent registration in `factory.js`; `agents` block added to `app.config.json`
+- [ ] Change E: `smoke-tests.json` rewritten with separate `steps` (actions only) and `assertions` arrays using supported assertion types
+- [ ] Change F: `data/*.db` added to `.gitignore`
 - [ ] All existing tests still pass after code changes
 
 ### Configuration
+- [ ] `app.config.json` uses `"id"` (not `"app_id"`) — required by `core/app-loader.js`
+- [ ] `app.config.json` uses `auth.credentials.email` / `auth.credentials.passwordEnv` — required by connector's `authenticate()`
 - [ ] `app.config.json` updated with correct staging `baseUrl` (`brainstormy-frontend-staging.onrender.com`)
-- [ ] `app.config.json` updated with correct test account email (`qa-automation@brainstormy.co`)
 - [ ] `connector.config.timeouts.navigation` set to `90000`
+- [ ] `connector.config.timeouts.clerkAuth` set to `30000` (retained from existing config)
 - [ ] `connector.config.timeouts.warmUp` set to `120000`
 - [ ] `connector.config.selectors` calibrated against actual Clerk UI
+- [ ] `agents.healer.scenarioFiles` references `scenarios/smoke-tests.json`
 
 ### Database & Storage
 - [ ] SQLite database auto-created at `data/qa-engine.db` on first engine run
@@ -921,7 +1178,7 @@ All items must be checked before this task is complete:
 
 ### First Smoke Test
 - [ ] `node cli/index.js test --app brainstormy --agent healer --mode smoke --skip-bug-detection` executes successfully
-- [ ] Test status is `passed` (or failures are clearly selector calibration issues, not infrastructure problems)
+- [ ] Test status is `passed` (or failures are clearly selector calibration issues, not infrastructure/pipeline problems)
 - [ ] Test run recorded in `data/qa-engine.db` `test_runs` table
 - [ ] Test results recorded in `data/qa-engine.db` `test_results` table
 - [ ] Screenshots captured and stored in evidence directory
@@ -938,32 +1195,49 @@ All items must be checked before this task is complete:
 
 ## Evaluation Findings Cross-Reference
 
-This table maps each finding from the Claude Code feasibility evaluation to its resolution in this spec:
+### v1.0 → v2.0 Findings (22 items — all resolved in v2.0)
 
-| # | Finding | Severity | Resolution in v2.0 |
-|---|---------|----------|---------------------|
-| 1 | DB path `database/qa.db` vs `data/qa-engine.db` | CRITICAL | Fixed — all references use `data/qa-engine.db` |
-| 2 | `scripts/migrate.js` doesn't exist | CRITICAL | Removed — DB initializes automatically on first engine run |
-| 3 | `scripts/create-app.js` doesn't exist | CRITICAL | Removed — apps load from JSON files at runtime |
-| 4 | `--no-bug-detection` flag missing | CRITICAL | Changed to `--skip-bug-detection`, listed as required code change (Step 4b) |
-| 5 | `--scenario` flag missing | CRITICAL | Removed — uses existing `--mode smoke` instead |
-| 6 | Scenario file structure mismatch | CRITICAL | Removed — uses existing `smoke-tests.json` scenarios |
-| 7 | `TWILIO_WHATSAPP_FROM` vs `TWILIO_FROM_NUMBER` | CRITICAL | Fixed — uses `TWILIO_FROM_NUMBER` throughout |
-| 8 | `WHATSAPP_DEFAULT_RECIPIENT` not recognized | CRITICAL | Fixed — uses `QA_ENGINE_NOTIFICATION_RECIPIENTS` |
-| 9 | `app.config.json` structure mismatch | SIGNIFICANT | Fixed — uses `baseUrl`, `connector.config.*`, `camelCase` keys |
-| 10 | No warm-up capability | SIGNIFICANT | Listed as required code change (Step 4a) with implementation |
-| 11 | No `notify` CLI command | SIGNIFICANT | Removed — uses standalone `scripts/verify-whatsapp.js` only |
-| 12 | Scenario action types don't match connector | SIGNIFICANT | Removed — uses existing smoke-tests.json with existing action vocabulary |
-| 13 | `test_data` config key not recognized | SIGNIFICANT | Fixed — uses `connector.config.testProjectName` |
-| 14 | Node.js 20 vs 24 already installed | MODERATE | Fixed — Step 1 says verify v18+, acknowledges v24 |
-| 15 | Selector key naming mismatch | MODERATE | Fixed — verification scripts use `connector.config.selectors.clerkEmailInput` etc. |
-| 16 | Missing tables in expected list | MODERATE | Fixed — checklist includes `fixes`, `scheduled_runs`, `schema_migrations` |
-| 17 | Test count needs verification | MODERATE | Fixed — prerequisite says "run `npm test` to confirm actual count" |
-| 18 | Verification scripts reference wrong config paths | MODERATE | Fixed — scripts read from `config.connector.config.*` |
-| 19 | `QA_ENGINE_ENV` not used | MINOR | Removed from `.env` template |
-| 20 | `.env.example` uses `TWILIO_FROM_NUMBER` | MINOR | Resolved by #7 |
-| 21 | `better-sqlite3` inline scripts | MINOR | Removed — no manual DB operations needed |
-| 22 | `npm link` needed for global command | MINOR | Added optional section explaining `npm link` |
+| # | Finding | Resolution |
+|---|---------|-----------|
+| 1 | DB path `database/qa.db` vs `data/qa-engine.db` | All references use `data/qa-engine.db` |
+| 2 | `scripts/migrate.js` doesn't exist | Removed — DB auto-initializes |
+| 3 | `scripts/create-app.js` doesn't exist | Removed — apps load from JSON |
+| 4 | `--no-bug-detection` flag missing | Changed to `--skip-bug-detection` as code change |
+| 5 | `--scenario` flag missing | Uses `--mode smoke` instead |
+| 6 | Scenario file structure mismatch | Uses existing `smoke-tests.json` |
+| 7 | `TWILIO_WHATSAPP_FROM` vs `TWILIO_FROM_NUMBER` | Uses `TWILIO_FROM_NUMBER` |
+| 8 | `WHATSAPP_DEFAULT_RECIPIENT` not recognized | Uses `QA_ENGINE_NOTIFICATION_RECIPIENTS` |
+| 9 | `app.config.json` structure mismatch | Uses `baseUrl`, `connector.config.*`, camelCase |
+| 10 | No warm-up capability | Listed as Change A |
+| 11 | No `notify` CLI command | Standalone script only |
+| 12 | Scenario action types don't match connector | Uses existing action vocabulary |
+| 13 | `test_data` config key not recognized | Uses `connector.config.testProjectName` |
+| 14 | Node.js 20 vs 24 | Acknowledges v24, verifies v18+ |
+| 15 | Selector key naming mismatch | Uses `clerkEmailInput` etc. |
+| 16 | Missing tables in expected list | Includes `fixes`, `scheduled_runs`, `schema_migrations` |
+| 17 | Test count needs verification | Says "run `npm test` to confirm" |
+| 18 | Verification scripts wrong config paths | Scripts use `config.connector.config.*` |
+| 19 | `QA_ENGINE_ENV` not used | Removed |
+| 20 | `.env.example` uses `TWILIO_FROM_NUMBER` | Resolved by #7 |
+| 21 | `better-sqlite3` inline scripts | Removed |
+| 22 | `npm link` needed for global command | Optional section added |
+
+### v2.0 → v3.0 Findings (12 items — all resolved in v3.0)
+
+| # | Finding | Severity | Resolution |
+|---|---------|----------|-----------|
+| 1 | CLI doesn't create Playwright browser/page/EvidenceCollector | CRITICAL | Change C: browser lifecycle in `engine.run()` (~40–50 lines) |
+| 2 | No scenario loading — agents get empty config `{}` | CRITICAL | Change D: scenario file loading + `agents` block in config (~30–40 lines) |
+| 3 | Scenario format (mixed action/assert in steps) incompatible with BaseAgent | CRITICAL | Change E: rewrite `smoke-tests.json` with separate `steps`/`assertions` arrays |
+| 4 | `app_id` vs `id` in config | CRITICAL | Changed to `"id": "brainstormy"` |
+| 5 | `auth.email` vs `auth.credentials.email` nesting | CRITICAL | Config uses `auth.credentials.email` / `auth.credentials.passwordEnv`; verify-auth.js updated |
+| 6 | `--skip-bug-detection` more complex than estimated | SIGNIFICANT | Updated Change B: threads through 3 files (~25 lines), not 2 |
+| 7 | `data/*.db` not in `.gitignore` | SIGNIFICANT | Change F: added to `.gitignore` |
+| 8 | `clerkAuth` timeout removed from proposed config | MODERATE | Retained `"clerkAuth": 30000` in timeouts |
+| 9 | `warmUp()` socket timeout vs response timeout nuance | MODERATE | Added hard deadline fallback via `setTimeout` in Change A |
+| 10 | Auth done by connector, not by scenario steps | MODERATE | Noted in Step 8 pipeline description; scenario names clarified |
+| 11 | `connector.base` field unused | MINOR | Removed from config |
+| 12 | Evidence directory creation | MINOR | Already handled by `fs.mkdirSync` in verify-auth.js |
 
 ---
 
