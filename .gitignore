@@ -9,6 +9,9 @@ node_modules/
 evidence/
 logs/
 database/*.db
+data/*.db
+data/*.db-journal
+data/*.db-wal
 results/
 
 # OS
