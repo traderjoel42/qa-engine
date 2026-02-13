@@ -48,3 +48,14 @@
   - Used wrapper methods (`this.click()`, `this.type()`, etc.) instead of spec's direct `this.page.*` calls — preserves existing error handling and evidence collection
   - Added `sessionSummaryButton` click in `getSessionSummary()` to match existing connector pattern
   - Enhanced `_extractIdFromUrl()` with dual path fallback (`app.config` + `app.connector.config`)
+
+---
+
+## Step 4: Verify ConnectorFactory
+
+- **Status:** done
+- **Changes:**
+  - Verified `connectors/factory.js` has `'brainstormy'` in `CONNECTOR_REGISTRY`
+  - `factory.getRegisteredTypes()` returns `['generic', 'ai-chat-app', 'brainstormy']` — PASS
+  - No modifications needed
+- **Deviations:** None
