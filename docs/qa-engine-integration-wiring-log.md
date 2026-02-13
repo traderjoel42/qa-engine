@@ -47,4 +47,14 @@
 - **Files modified:** `package.json`
 - **Status:** done
 - **Deviations:** None — implemented verbatim from spec sections 4.9 and 4.10
+- **Commit:** 5ef56b3
+
+---
+
+## Step 6: Create test files
+
+- **Files created:** `tests/core/config.test.js` (16 tests), `tests/core/app-loader.test.js` (10 tests), `tests/engine/factory.test.js` (24 tests), `tests/cli/test-command.test.js` (10 tests), `tests/cli/status-command.test.js` (8 tests), `tests/cli/bugs-command.test.js` (8 tests)
+- **Status:** done
+- **Deviations:** Minor — agent registration tests pass `appLoader` override in `createEngine()` (not `engine.run()`) since the factory binds the loader at creation time. Spec's test patterns showed the right idea, adapted to actual factory wiring.
+- **New test count:** 76 tests across 6 files (spec estimated 72; 4 extra due to validateConfig having 4 tests counted separately)
 - **Commit:** (pending)
