@@ -987,7 +987,7 @@ function createMockTwilioClient(overrides = {}) {
 | 4 | Twilio WhatsApp Adapter | ~59 |
 | **Total** | | **~116** |
 
-**Running total after Week 4 Days 3-4: ~1527 tests** (1411 after Days 1-2 + 116 new)
+**Running total after Week 4 Days 3-4: ~1536 tests** (1420 after Days 1-2 + 116 new)
 
 ---
 
@@ -1014,6 +1014,8 @@ function createMockTwilioClient(overrides = {}) {
 ## Integration Points
 
 ### How These Adapters Connect to Existing Components
+
+**Prerequisite fix:** Add `this.cause = options.cause || null;` to `AdapterError` in `core/engine/errors.js`. Currently AdapterError does not store the `cause` field, so SDK errors passed as `cause: error` would be silently dropped. This is a 1-line addition to the existing class.
 
 Neither adapter modifies existing components. They implement interfaces that existing components already accept via constructor injection.
 
@@ -1077,7 +1079,7 @@ Consumers (Bug Detector, Approval Manager) already handle `AdapterError` in thei
 
 ```json
 {
-  "@anthropic-ai/sdk": "^0.39.x",
+  "@anthropic-ai/sdk": "^0.74.x",
   "twilio": "^5.x"
 }
 ```
