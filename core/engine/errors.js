@@ -79,6 +79,14 @@ class StateManagerError extends EngineError {
   }
 }
 
+class AppLoaderError extends EngineError {
+  constructor(message, appId = null) {
+    super(message);
+    this.name = 'AppLoaderError';
+    this.appId = appId;
+  }
+}
+
 module.exports = {
   EngineError,
   BugDetectorError,
@@ -88,5 +96,6 @@ module.exports = {
   DatabaseError,
   ConnectionError,
   MigrationError,
-  StateManagerError
+  StateManagerError,
+  AppLoaderError
 };
