@@ -61,7 +61,19 @@
         "bookmarksTab": "[data-testid='bookmarks-tab'], a[href*='bookmarks']",
         "bookmarkItem": "[data-testid='bookmark-item'], .bookmark-list-item",
         "sessionSummaryContent": "[data-testid='session-summary'], .session-summary-content",
-        "readyIndicator": "#root"
+        "readyIndicator": "#root",
+
+        "projectHeading": "[data-testid='project-heading'], h1.project-name",
+        "projectList": "[data-testid='project-list'], .projects-container",
+        "projectCard": "[data-testid='project-card'], .project-card",
+
+        "storyHeading": "[data-testid='story-heading'], h1.story-name",
+        "storyList": "[data-testid='story-list'], .stories-container",
+        "storyCard": "[data-testid='story-card'], .story-card",
+
+        "messageList": "[data-testid='message-list'], .messages-container",
+        "userMessageLast": "[data-testid='user-message']:last-of-type",
+        "assistantMessageLast": "[data-testid='assistant-message']:last-of-type"
       },
       "timeouts": {
         "navigation": 90000,
