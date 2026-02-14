@@ -189,6 +189,9 @@ class AIAppConnector extends GenericWebAppConnector {
         }));
       }
 
+      // Store last AI response text for assertion access
+      this.setState('last_ai_response', responseData.text || '');
+
       // Track in state
       const messages = this.getState('messages') || [];
       const entry = {

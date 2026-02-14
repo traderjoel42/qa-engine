@@ -360,7 +360,7 @@ class BrainstormyConnector extends AIAppConnector {
   async performAction(action, params = {}) {
     const brainstormyActions = [
       'create_project', 'create_story', 'create_session',
-      'navigate_to_story', 'navigate_to_session',
+      'navigate_to_project', 'navigate_to_story', 'navigate_to_session',
       'generate_bible', 'get_bible',
       'generate_report', 'get_report',
       'end_session', 'get_session_summary',
@@ -391,11 +391,17 @@ class BrainstormyConnector extends AIAppConnector {
           break;
 
         // Navigation
+        case 'navigate_to_project': {
+          const projectId = params.project_id || this.getState('current_project_id');
+          if (!projectId) throw new ConnectorError('No project ID available — provide project_id param or run create_project first', { action: 'navigate_to_project', phase: 'interact' });
+          result = await this.navigateToProject(projectId);
+          break;
+        }
         case 'navigate_to_story':
-          result = await this.navigateToStory(params.story_id || params.name);
+          result = await this.navigateToStory(params.story_id || params.name || this.getState('current_story_id'));
           break;
         case 'navigate_to_session':
-          result = await this.navigateToSession(params.session_id || params.name);
+          result = await this.navigateToSession(params.session_id || params.name || this.getState('current_session_id'));
           break;
 
         // Bible operations
@@ -646,6 +652,19 @@ class BrainstormyConnector extends AIAppConnector {
   }
 
   /**
+   * Navigate to a specific project by ID.
+   * @param {string} projectId - Project UUID
+   * @returns {Promise<{navigated: boolean, projectId: string}>}
+   */
+  async navigateToProject(projectId) {
+    await this.navigate(`/projects/${projectId}`);
+    await this.waitForAppReady();
+    this.currentProjectId = projectId;
+    this.setState('current_project_id', projectId);
+    return { navigated: true, projectId };
+  }
+
+  /**
    * Navigate to a specific story by name or ID.
    * @param {string} storyIdentifier - Story name, UUID, or storyId
    */
@@ -680,6 +699,15 @@ class BrainstormyConnector extends AIAppConnector {
    * @param {string} sessionIdentifier - Session name or UUID
    */
   async navigateToSession(sessionIdentifier) {
+    // Direct navigation for UUIDs
+    if (sessionIdentifier && /^[0-9a-f-]{36}$/i.test(sessionIdentifier)) {
+      await this.navigate(`/sessions/${sessionIdentifier}`);
+      await this.waitForAppReady();
+      this.currentSessionId = sessionIdentifier;
+      this.setState('current_session_id', sessionIdentifier);
+      return { navigated: true, sessionId: sessionIdentifier };
+    }
+
     const sessionItems = await this.page.$$(this.getSelector('sessionItem'));
     for (const item of sessionItems) {
       const text = await item.textContent();
