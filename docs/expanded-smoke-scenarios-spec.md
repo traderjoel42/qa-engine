@@ -1,6 +1,6 @@
 # Expanded Smoke Scenarios Specification
 
-**Version:** 1.1
+**Version:** 1.2
 **Date:** February 14, 2026
 **Phase:** QA Engine Phase 2 — Task 2
 **Prerequisite:** Phase 2 Task 1 (First-Run Validation) complete ✅
@@ -10,37 +10,29 @@
 
 ## Changelog
 
+### v1.2 (February 14, 2026)
+
+Fixes from second feasibility evaluation against current codebase (post-git-pull):
+
+**Critical:**
+- Fixed smoke-02 ID mismatch: remote commit 1851751 reverted the first-run rename, so the file currently has `smoke-02-navigate-project`. The spec now references this ID throughout, and Task 1 includes renaming it back to `smoke-02-sidebar-loaded` (which was the validated, passing version). All `depends_on` chains reference the post-rename ID.
+
+**Moderate:**
+1. Added explicit SPA risk note for `createProject()`'s internal `this.navigate('/projects')` call (connector.js:468). This uses `page.goto()` — the same mechanism that broke smoke-02 during first-run. May work post-hydration but needs testing during calibration (Task 6).
+2. Fixed `navigate_to_session` switch case: state fallback must happen in the switch case (`params.session_id || params.name || this.getState('current_session_id')`), not inside the method body, because the method signature is `navigateToSession(sessionIdentifier)`.
+3. Fixed `wait_for_response` state fix: variable is `responseData.text` not `responseText`. Added note that `BrainstormyConnector.waitForAIResponse()` overrides the AIAppConnector method and calls `super` — the state is set during the super call, no separate changes needed in the override.
+4. Reduced selector list from 18 to 11: removed 7 selectors that already exist in `app.config.json` with calibrated values from first-run (`chatInput`, `chatSend`, `sessionList`, `sessionItem`, `newProjectButton`, `newStoryButton`, `newSessionButton`). Existing calibrated values must be preserved.
+5. Replaced `:last-of-type` message selectors with `data-testid`-only primary selectors and `page.evaluate()`-based fallback strategy, since `:last-of-type` matches on HTML tag name, not CSS class — if both user and assistant messages are `<div>` elements, it matches the wrong one.
+6. Removed unused breadcrumb selectors (`breadcrumbProject`, `breadcrumbStory`, `breadcrumbSession`) — no scenario references them after smoke-08 was redesigned to use `navigate_to_*` actions.
+
+**Minor:**
+7. Fixed `element_text_contains` code sample to match actual structure at `base-agent.js:418-428` (uses `this.connector` and existing `text` variable, not standalone `connector`).
+8. Removed redundant `|| 30000` default from `wait` action fix — `waitFor()` already defaults to 30000.
+9. Added explicit task dependency order to task list.
+
 ### v1.1 (February 14, 2026)
 
-Fixes from feasibility evaluation against actual codebase:
-
-**P0 — Critical (would have caused immediate runtime failures):**
-- Fixed all action names from camelCase to snake_case to match connector's `performAction()` switch (`create_project`, `create_story`, `create_session`, `send_message`, `wait_for_response`)
-- Fixed `step_succeeded` assertions: `step` → `stepIndex` to match `base-agent.js:442`
-- Flagged `element_text_contains` bug: `extractData()` returns `{text, value, html, attributes}` object, but assertion at `base-agent.js:428` calls `String(text)` on it producing `"[object Object]"`. Added as required code fix (Task 0a)
-- Flagged `wait` action selector resolution bug: existing `wait` action passes `params.selector` as raw CSS without calling `getSelector()`. Added as required code fix (Task 0b)
-- Replaced all direct `/projects` URL navigation with sidebar click navigation to avoid SPA hydration failure (documented in first-run Step 8 calibration note)
-
-**P1 — Significant gaps:**
-- Added `navigate_to_project` as new action (was missing from connector entirely)
-- Replaced `use_state` param pattern with explicit state reads in connector action implementations — no existing action supports `use_state`
-- Documented that group/order/depends_on runner logic requires changes to `BaseAgent.runTests()`, not a separate `runSuite()` method, and that `_computeSummary()` needs `skipped_dependency` status
-- Added `setState('last_ai_response', ...)` to `waitForAIResponse` connector fix
-- Added `setState('current_vertical', ...)` to `createStory` connector fix
-- Replaced `apiGet`/`apiDelete` cleanup approach with Playwright-based cleanup using existing connector methods plus a new `archive_test_data` enhancement
-
-**Moderate fixes:**
-- Corrected smoke-02 reference: actual passing scenario is `smoke-02-sidebar-loaded` (first-run renamed it)
-- Removed redundant `navigate /projects` step from smoke-03 (`create_project` already navigates internally)
-- Noted that `navigate_to_session` needs refactoring: current implementation searches DOM by text/href, doesn't support direct ID navigation
-- Changed new selector keys to camelCase to match existing `app.config.json` convention
-- Replaced `:last-child` message selectors with `:last-of-type` and noted calibration requirement
-- Kept scenario file as plain array (no wrapper object) to preserve existing convention
-
-**Already done (removed from task list):**
-- `{{timestamp}}` interpolation — already in `BaseAgent.resolveParams()` at `base-agent.js:565-579`
-- `wait` action existence — already in `GenericWebAppConnector.performAction()` switch (needs selector fix only)
-- State passthrough infrastructure — `BaseConnector.state` Map with `setState()`/`getState()` already works
+Fixes from first feasibility evaluation — see v1.1 changelog for full details. Key fixes: snake_case action names, `stepIndex` field, pre-existing bugs flagged, SPA navigation avoidance, `use_state` pattern eliminated, cleanup rewritten without phantom API methods.
 
 ---
 
@@ -48,12 +40,12 @@ Fixes from feasibility evaluation against actual codebase:
 
 ### What Exists Today
 
-`apps/brainstormy/scenarios/smoke-tests.json` contains two passing scenarios:
+`apps/brainstormy/scenarios/smoke-tests.json` contains two scenarios:
 
-| ID | Name | What It Tests |
+| ID (current file) | ID (after Task 1 rename) | What It Tests |
 |----|------|---------------|
-| `smoke-01-login` | Verify authenticated state | Confirms Clerk session injection worked |
-| `smoke-02-sidebar-loaded` | Verify sidebar loads | Confirms app shell renders after auth (renamed from `smoke-02-navigate-project` during first-run calibration due to SPA hydration issue) |
+| `smoke-01-login` | `smoke-01-login` (unchanged) | Confirms Clerk session injection worked |
+| `smoke-02-navigate-project` | `smoke-02-sidebar-loaded` | Confirms app shell renders after auth. **Note:** Remote commit 1851751 reverted the first-run rename. Task 1 renames it back to `smoke-02-sidebar-loaded` and restores the validated sidebar-check behavior that passed during first-run. |
 
 Authentication is handled by `connector.initialize()` via Clerk Backend API session injection — no scenario needs login steps.
 
@@ -125,17 +117,13 @@ Before scenarios can run, two pre-existing bugs must be fixed:
 
 ### 3.1 `element_text_contains` Assertion Bug
 
-**Location:** `base-agent.js:428`
-**Problem:** `GenericWebAppConnector.extractData()` at `generic-web-app/connector.js:414` returns an object `{text, value, html, attributes}`. The assertion code does:
-```javascript
-passed = text !== null && String(text).includes(assertion.value);
-```
-`String({text: "...", ...})` produces `"[object Object]"`, which never matches any expected value.
+**Location:** `base-agent.js:418-428`
+**Problem:** `GenericWebAppConnector.extractData()` at `generic-web-app/connector.js:414` returns an object `{text, value, html, attributes}`. The assertion code assigns this object to `text`, then does `String(text).includes(assertion.value)` — producing `"[object Object]"`, which never matches.
 
-**Fix:** Change the assertion to extract the `.text` property:
+**Fix:** Add after the existing try/catch block that assigns `text`:
 ```javascript
-const extracted = await connector.extractData(resolvedSelector);
-const text = extracted?.text ?? null;
+// base-agent.js — inside the element_text_contains case, after try/catch:
+text = text?.text ?? null;  // extractData returns {text, value, html, attributes}
 passed = text !== null && String(text).includes(assertion.value);
 ```
 
@@ -144,15 +132,17 @@ passed = text !== null && String(text).includes(assertion.value);
 ### 3.2 `wait` Action Selector Resolution Bug
 
 **Location:** `generic-web-app/connector.js:292-294`
-**Problem:** The existing `wait` action passes `params.selector` directly to `waitFor()` as raw CSS. When scenarios use logical selector names (e.g., `"sessionList"`), these are passed as literal CSS and fail because no DOM element matches `sessionList`.
+**Problem:** The existing `wait` action passes `params.selector` directly to `waitFor()` as raw CSS. When scenarios use logical selector names (e.g., `"sessionList"`), these are passed as literal CSS and fail.
 
-**Fix:** Add selector resolution:
+**Fix:**
 ```javascript
 case 'wait':
   const resolvedSelector = this.getSelector(params.selector) || params.selector;
-  await this.waitFor(resolvedSelector, params.timeout || 30000);
+  await this.waitFor(resolvedSelector, params.timeout);
   return { found: true, selector: params.selector };
 ```
+
+**Note:** No `|| 30000` default for timeout needed — `waitFor()` at `connector.js:387` already defaults to 30000.
 
 **Affects:** smoke-08 (uses logical names `storyList`, `sessionList`, `chatInput` in wait steps).
 
@@ -164,7 +154,9 @@ All scenarios follow the established format: separate `steps` (actions) and `ass
 
 ### 4.1 smoke-03-create-project
 
-`create_project` already navigates to `/projects` internally (connector.js:468), so no explicit navigate step is needed. This also avoids the SPA hydration issue with direct URL navigation.
+`create_project` already navigates to `/projects` internally (connector.js:468) via `this.navigate('/projects')`. No explicit navigate step is needed.
+
+**⚠️ SPA hydration risk:** `create_project` calls `page.goto()` internally — the same mechanism that broke smoke-02 during first-run. This may work fine if the SPA shell is already hydrated from `initialize()` and `page.goto()` triggers client-side routing rather than a full reload. **This must be tested during Task 6 calibration.** If it fails, the `createProject()` method itself needs to be modified to use sidebar click navigation instead of `page.goto()`.
 
 ```json
 {
@@ -201,8 +193,6 @@ All scenarios follow the established format: separate `steps` (actions) and `ass
   ]
 }
 ```
-
-**Note:** The `element_text_contains` assertion from v1.0 is removed. It depends on the bug fix in Section 3.1 and the text match is fragile (the `{{timestamp}}` suffix changes each run). The `url_contains` + `state_truthy` + `element_exists` trio is sufficient to verify project creation. If text verification is wanted after the bug fix, it can be re-added with a partial match on `"QA Smoke Test"`.
 
 ### 4.2 smoke-04-create-story
 
@@ -244,8 +234,6 @@ All scenarios follow the established format: separate `steps` (actions) and `ass
   ]
 }
 ```
-
-**Note:** The `state_equals` assertion on `current_vertical` from v1.0 is removed. `createStory()` at `connector.js:511-555` does not currently set this state key. Rather than adding it just for an assertion, we verify story creation through URL redirect + state ID + heading visibility. If vertical validation is needed later, add `setState('current_vertical', vertical)` to `createStory()` first.
 
 ### 4.3 smoke-05-create-session
 
@@ -325,8 +313,6 @@ All scenarios follow the established format: separate `steps` (actions) and `ass
 }
 ```
 
-**Note:** The `element_text_contains` assertion from v1.0 is removed (depends on bug fix in Section 3.1). `step_succeeded` + `element_exists` on the last user message is sufficient to verify the message was sent and rendered.
-
 ### 4.5 smoke-07-ai-response
 
 ```json
@@ -371,11 +357,9 @@ All scenarios follow the established format: separate `steps` (actions) and `ass
 }
 ```
 
-**Implementation requirement:** The `state_truthy` assertion on `last_ai_response` requires a connector change. `AIAppConnector.waitForAIResponse()` at `ai-chat-app/connector.js:192-200` currently only stores the response in the `messages` array — it does not call `setState('last_ai_response', ...)`. This must be added (see Task 2d below).
+**Implementation requirement:** See Section 6.2 for the `last_ai_response` connector fix.
 
 ### 4.6 smoke-08-hierarchy-navigation
-
-This scenario navigates via connector actions that read IDs from state, avoiding direct URL navigation and the SPA hydration issue.
 
 ```json
 {
@@ -438,55 +422,65 @@ This scenario navigates via connector actions that read IDs from state, avoiding
 }
 ```
 
-**Key design choices:**
-- No `use_state` params — that pattern doesn't exist in the codebase. Each `navigate_to_*` action reads from connector state internally when no explicit ID param is provided (see Section 6.2).
-- No direct `/projects` URL navigation — avoids SPA hydration failure.
-- Empty `params: {}` signals "use state" — the action implementations default to reading from `current_project_id`, `current_story_id`, `current_session_id`.
+**Design:** Empty `params: {}` signals "use state." Each `navigate_to_*` action reads from connector state internally when no explicit ID param is provided — the state fallback is in the `performAction()` switch case, not inside the method body (see Section 6.2).
 
 ---
 
 ## 5. New Selectors Required in `app.config.json`
 
-New keys use camelCase to match the existing convention (e.g., `chatInput`, `aiMessage`, `userMenu`). CSS values are placeholders requiring calibration against real staging.
+Seven selectors needed by scenarios already exist with calibrated values from first-run. These must **not** be overwritten. Only 11 genuinely new selectors need to be added.
+
+### Existing Selectors (preserve as-is)
+
+These are already in `app.config.json` with working values:
+
+| Key | Already Calibrated |
+|-----|--------------------|
+| `chatInput` | ✅ `[data-testid="chat-input"], textarea[placeholder*="message"]` |
+| `chatSend` | ✅ `[data-testid="chat-send"], button[aria-label="Send"]` |
+| `sessionList` | ✅ `[data-testid="session-list"], .session-list` |
+| `sessionItem` | ✅ `[data-testid="session-item"], .session-list-item` |
+| `newProjectButton` | ✅ `.nav-vertical__add-btn, .section-header__add-btn` |
+| `newStoryButton` | ✅ `[data-testid="new-story-button"], button:has-text("New Story")` |
+| `newSessionButton` | ✅ `[data-testid="new-session-button"], button:has-text("New Session")` |
+
+**Do not overwrite these during Task 4.** Their CSS fallback values were calibrated during first-run.
+
+### New Selectors to Add (11 keys)
+
+CSS values are placeholders requiring calibration against real staging:
 
 ```json
 {
-  "selectors": {
-    "___EXISTING_KEYS_UNCHANGED___": "...",
+  "projectHeading":        "[data-testid='project-heading'], h1.project-name",
+  "projectList":           "[data-testid='project-list'], .projects-container",
+  "projectCard":           "[data-testid='project-card'], .project-card",
 
-    "projectHeading":        "[data-testid='project-heading'], h1.project-name",
-    "projectList":           "[data-testid='project-list'], .projects-container",
-    "projectCard":           "[data-testid='project-card'], .project-card",
+  "storyHeading":          "[data-testid='story-heading'], h1.story-name",
+  "storyList":             "[data-testid='story-list'], .stories-container",
+  "storyCard":             "[data-testid='story-card'], .story-card",
 
-    "storyHeading":          "[data-testid='story-heading'], h1.story-name",
-    "storyList":             "[data-testid='story-list'], .stories-container",
-    "storyCard":             "[data-testid='story-card'], .story-card",
-
-    "sessionList":           "[data-testid='session-list'], .sessions-container",
-    "sessionItem":           "[data-testid='session-item'], .session-item",
-
-    "chatInput":             "[data-testid='chat-input'], textarea.message-input",
-    "chatSend":              "[data-testid='chat-send'], button.send-button",
-    "messageList":           "[data-testid='message-list'], .messages-container",
-    "userMessageLast":       "[data-testid='user-message']:last-of-type, .message.user:last-of-type",
-    "assistantMessageLast":  "[data-testid='assistant-message']:last-of-type, .message.assistant:last-of-type",
-
-    "newProjectButton":      "[data-testid='new-project-button'], button:has-text('New Project')",
-    "newStoryButton":        "[data-testid='new-story-button'], button:has-text('New Story')",
-    "newSessionButton":      "[data-testid='new-session-button'], button:has-text('New Session')",
-
-    "breadcrumbProject":     "[data-testid='breadcrumb-project'], .breadcrumb .project-link",
-    "breadcrumbStory":       "[data-testid='breadcrumb-story'], .breadcrumb .story-link",
-    "breadcrumbSession":     "[data-testid='breadcrumb-session'], .breadcrumb .session-link"
-  }
+  "messageList":           "[data-testid='message-list'], .messages-container",
+  "userMessageLast":       "[data-testid='user-message']:last-of-type",
+  "assistantMessageLast":  "[data-testid='assistant-message']:last-of-type"
 }
 ```
 
-**Calibration notes:**
-- All keys are camelCase (v1.0 used snake_case which mismatched existing convention)
-- Message selectors use `:last-of-type` instead of `:last-child` (`:last-child` fails when message containers have padding/footer elements as siblings)
-- Some selectors like `chatInput` may already exist in the config — during calibration, deduplicate rather than add duplicates
-- The `getSelector()` method handles snake_case→camelCase conversion, so scenario JSON can use either convention for selector references, but config keys should be consistently camelCase
+**Message selector calibration warning:** The `userMessageLast` and `assistantMessageLast` selectors rely on `data-testid` as the primary strategy. The `:last-of-type` pseudo-class matches based on HTML tag name, not CSS class — if user and assistant messages are both `<div>` elements, `:last-of-type` would match the last `<div>` in the container regardless of message role. During calibration (Task 4), inspect the actual DOM to determine:
+- Whether `data-testid="user-message"` / `data-testid="assistant-message"` exist (ideal case)
+- Whether messages use different HTML tags (e.g., `<div>` vs `<article>`) enabling `:last-of-type`
+- If neither works, implement a custom `getLastMessageByRole` helper in the connector using `page.evaluate()`:
+
+```javascript
+async getLastMessageByRole(role) {
+  return this.page.evaluate((r) => {
+    const msgs = document.querySelectorAll(`[data-role="${r}"], .message.${r}`);
+    return msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  }, role);
+}
+```
+
+**Removed from v1.1:** `breadcrumbProject`, `breadcrumbStory`, `breadcrumbSession` — no scenario uses them after smoke-08 was redesigned. Can be added later if breadcrumb-based scenarios are created.
 
 ---
 
@@ -497,17 +491,19 @@ New keys use camelCase to match the existing convention (e.g., `chatInput`, `aiM
 | Action (snake_case) | Exists? | Changes Needed |
 |---------------------|---------|----------------|
 | `navigate` | ✅ GenericWebAppConnector | None |
-| `create_project` | ✅ BrainstormyConnector | None |
-| `create_story` | ✅ BrainstormyConnector | None (see note on `current_vertical` below) |
+| `create_project` | ✅ BrainstormyConnector | None (SPA risk noted in Section 4.1) |
+| `create_story` | ✅ BrainstormyConnector | None |
 | `create_session` | ✅ BrainstormyConnector | None |
 | `send_message` | ✅ AIAppConnector | None |
 | `wait_for_response` | ✅ AIAppConnector | Add `setState('last_ai_response', ...)` |
 | `wait` | ✅ GenericWebAppConnector | Fix selector resolution (Section 3.2) |
-| `navigate_to_story` | ✅ BrainstormyConnector | Add state-based ID lookup as fallback |
+| `navigate_to_story` | ✅ BrainstormyConnector | Add state fallback in switch case |
 | `navigate_to_project` | ❌ **New** | Implement |
-| `navigate_to_session` | ⚠️ Exists but needs refactor | Current implementation searches DOM by text/href; needs direct ID navigation support |
+| `navigate_to_session` | ⚠️ Exists, needs refactor | Add state fallback in switch case + UUID direct navigation |
 
 ### 6.2 New/Modified Actions
+
+All state fallbacks happen in the `performAction()` switch case, not inside the method body. This matches the existing pattern where the switch case resolves params before calling the method.
 
 #### `navigate_to_project` (New)
 
@@ -519,61 +515,78 @@ case 'navigate_to_project':
   if (!projectId) throw new Error('No project ID available — provide project_id param or run create_project first');
   await this.navigate(`/projects/${projectId}`);
   await this.waitForAppReady();
-  return { navigated: true, projectId };
+  result = { navigated: true, projectId };
+  break;
 ```
 
-**SPA hydration note:** This uses `this.navigate()` for in-app navigation (not cold page load), which should work after the app shell is already hydrated from `initialize()`. If this still hits the SPA issue during calibration, the fallback is to find and click the project in the sidebar by matching a `data-project-id` attribute. Determine the correct approach during Task 6.
+#### `navigate_to_story` (Add state fallback in switch case)
 
-#### `navigate_to_session` (Refactor)
-
-The current implementation at `connector.js:682-694` searches session items by matching text/href content in the DOM. It does **not** accept a session ID directly. Modify to support state-based ID lookup:
-
-```javascript
-case 'navigate_to_session':
-  const sessionId = params.session_id || this.getState('current_session_id');
-  if (!sessionId) throw new Error('No session ID available');
-  // If it looks like a UUID, navigate directly
-  if (sessionId.match(/^[0-9a-f-]{36}$/i)) {
-    await this.navigate(`/sessions/${sessionId}`);
-    await this.waitForAppReady();
-  } else {
-    // Fall back to existing DOM search by text/name
-    // ... existing implementation unchanged ...
-  }
-  return { navigated: true, sessionId };
-```
-
-#### `navigate_to_story` (Minor enhancement)
-
-Already exists and handles UUIDs, but should also support reading from state when no params provided:
-
+Current switch case at `connector.js:393-394`:
 ```javascript
 case 'navigate_to_story':
-  const storyId = params.story_id || params.name || this.getState('current_story_id');
-  if (!storyId) throw new Error('No story ID available');
-  // ... rest of existing implementation unchanged ...
+  result = await this.navigateToStory(params.story_id || params.name);
 ```
 
-#### `wait_for_response` (Add state key)
+Change to:
+```javascript
+case 'navigate_to_story':
+  result = await this.navigateToStory(params.story_id || params.name || this.getState('current_story_id'));
+```
 
-In `AIAppConnector.waitForAIResponse()` at `ai-chat-app/connector.js:192-200`, add after extracting the response:
+#### `navigate_to_session` (Add state fallback in switch case + UUID support)
+
+Current switch case at `connector.js:397-398`:
+```javascript
+case 'navigate_to_session':
+  result = await this.navigateToSession(params.session_id || params.name);
+```
+
+Change to:
+```javascript
+case 'navigate_to_session':
+  result = await this.navigateToSession(params.session_id || params.name || this.getState('current_session_id'));
+```
+
+Then, inside `navigateToSession(sessionIdentifier)` at `connector.js:682-694`, add UUID detection before the existing DOM search:
+```javascript
+async navigateToSession(sessionIdentifier) {
+  // Direct navigation for UUIDs
+  if (sessionIdentifier && sessionIdentifier.match(/^[0-9a-f-]{36}$/i)) {
+    await this.navigate(`/sessions/${sessionIdentifier}`);
+    await this.waitForAppReady();
+    return { navigated: true, sessionId: sessionIdentifier };
+  }
+  // ... existing DOM search by text/href for non-UUID values ...
+}
+```
+
+#### `wait_for_response` (Add `last_ai_response` state)
+
+In `AIAppConnector.waitForAIResponse()` at `ai-chat-app/connector.js:184-190`, add after the existing `responseData` extraction:
 
 ```javascript
-// After existing code that stores in messages array:
-this.setState('last_ai_response', responseText || '');
+// After existing code:
+// let responseData = { text: '', html: '' };
+// if (lastMessage) {
+//   responseData = await lastMessage.evaluate(el => ({
+//     text: el.textContent,
+//     html: el.innerHTML
+//   }));
+// }
+
+// ADD THIS LINE:
+this.setState('last_ai_response', responseData.text || '');
 ```
 
-This enables the `state_truthy` assertion in smoke-07.
+**Note:** `BrainstormyConnector.waitForAIResponse()` at `connector.js:1057-1067` overrides this method and calls `super.waitForAIResponse(timeout)`. The state is set during the `super` call, so the override does not need separate changes.
 
 ### 6.3 Param Resolution Design
 
-No `use_state` parameter pattern is introduced. The v1.0 spec proposed `"use_state": "current_project_id"` but no existing action supports this pattern. Instead, each `navigate_to_*` action reads from state internally when no explicit ID param is provided. This follows the existing pattern used by `create_session` (which reads `current_story_id` from state at `connector.js:562`).
-
-Scenarios pass `params: {}` to signal "use whatever is in state." This is simple, consistent with existing patterns, and doesn't require new infrastructure.
+No `use_state` parameter pattern is introduced. Each `navigate_to_*` switch case reads from state as a final fallback when no explicit param is provided. Scenarios pass `params: {}` to signal "use whatever is in state." This follows the existing pattern used by `create_session` (which reads `current_story_id` from state at `connector.js:562`).
 
 ### 6.4 Template Variable Note
 
-The `{{timestamp}}` and `{{uuid}}` interpolation already exists in `BaseAgent.resolveParams()` at `base-agent.js:565-579`. No implementation work needed — scenarios can use `{{timestamp}}` in params immediately.
+`{{timestamp}}` and `{{uuid}}` interpolation already exists in `BaseAgent.resolveParams()` at `base-agent.js:565-579`. No implementation work needed.
 
 ---
 
@@ -581,28 +594,19 @@ The `{{timestamp}}` and `{{uuid}}` interpolation already exists in `BaseAgent.re
 
 ### Decision: Tag-and-Sweep with Delayed Cleanup
 
-**Rationale:** Test data should persist long enough for debugging but not accumulate indefinitely.
+1. **Tagging:** All test entities use `QA Smoke Test *` naming with `{{timestamp}}` suffix.
 
-### How It Works
+2. **Post-run hold:** Successful runs leave data for 1 hour. Failed runs preserve data indefinitely for debugging.
 
-1. **Tagging:** All test entities use a recognizable naming pattern: `QA Smoke Test *`. The `{{timestamp}}` suffix makes each run's data unique.
-
-2. **Post-run hold:** After a successful suite run, test data is left in place for 1 hour for manual inspection.
-
-3. **Cleanup trigger:** Runs at the start of the next suite run (cleaning stale data from previous runs), or on-demand via CLI: `qa-engine cleanup --app brainstormy`.
-
-4. **Failed run behavior:** If the suite fails, test data is NOT cleaned up — this preserves the exact state for debugging.
+3. **Cleanup trigger:** Runs at the start of the next suite run, or on-demand via CLI.
 
 ### Implementation
-
-The v1.0 spec used `this.apiGet()` / `this.apiDelete()` methods that don't exist anywhere in the connector hierarchy. Revised approach uses Playwright and existing connector methods:
 
 **Option A — `page.evaluate()` with fetch (preferred if API endpoint exists):**
 ```javascript
 async cleanupTestData(options = {}) {
   const maxAge = options.maxAge || 3600000; // 1 hour
 
-  // Use in-browser fetch to call the API directly — avoids UI navigation
   const projects = await this.page.evaluate(async () => {
     const res = await fetch('/api/projects', { credentials: 'include' });
     return res.json();
@@ -626,8 +630,7 @@ async cleanupTestData(options = {}) {
 
 **Prerequisite check:** Verify during calibration whether Brainstormy has a `DELETE /api/projects/:id` endpoint. If not, either add a staging-only admin endpoint or use Option B.
 
-**Option B — Playwright UI navigation (fallback):**
-Navigate to projects page, find test projects by name, click through delete flow in UI. This is slower and more fragile but doesn't require API changes. Implementation follows the pattern from the existing `archive_test_data` action.
+**Option B — Playwright UI navigation (fallback):** Navigate to projects page, find test projects by name, click through delete flow in UI. Slower and more fragile but doesn't require API changes.
 
 ---
 
@@ -635,11 +638,8 @@ Navigate to projects page, find test projects by name, click through delete flow
 
 ### 8.1 Group-Aware Execution
 
-The group/order/depends_on logic must be added to `BaseAgent.runTests()` — this is **not** a separate `runSuite()` method. The current implementation iterates scenarios sequentially with `for...of` and has no awareness of groups, ordering, or dependencies.
+Changes required to `BaseAgent.runTests()` — not a separate method:
 
-Required changes:
-
-**In `BaseAgent.runTests()` (base-agent.js):**
 ```javascript
 // Before iterating scenarios, sort by group then order:
 const groupPriority = { independent: 0, setup: 1, test: 2 };
@@ -650,7 +650,6 @@ scenarios.sort((a, b) =>
 let setupFailed = false;
 
 for (const scenario of scenarios) {
-  // Skip test scenarios if setup failed
   if (setupFailed && scenario.group === 'test') {
     results.push({
       scenarioId: scenario.id,
@@ -663,7 +662,6 @@ for (const scenario of scenarios) {
   const result = await this.runScenario(scenario);
   results.push(result);
 
-  // If a setup scenario fails, flag for downstream skipping
   if (result.status === 'failed' && scenario.group === 'setup') {
     setupFailed = true;
   }
@@ -671,30 +669,23 @@ for (const scenario of scenarios) {
 ```
 
 **In `BaseAgent._computeSummary()` (base-agent.js:586-593):**
-Add `skipped_dependency` to the status counts:
 ```javascript
 summary.skipped_dependency = results.filter(r => r.status === 'skipped_dependency').length;
-// Ensure skipped_dependency scenarios don't count as failures
 summary.failed = results.filter(r => r.status === 'failed').length;
+// skipped_dependency does not count as failed
 ```
 
-**In `test-orchestrator.js:392-436` (summary computation):**
-Same change — count `skipped_dependency` separately from `failed` and `skipped`.
+**In `test-orchestrator.js:392-436`:** Same `skipped_dependency` awareness.
 
 ### 8.2 Backward Compatibility
 
-Scenarios without `group`/`order`/`depends_on` fields get defaults:
-- `group`: `"independent"` (no ordering constraint)
-- `order`: `0` (runs first within its group)
-- `depends_on`: `[]`
-
-This means the existing `smoke-01` and `smoke-02` scenarios continue to work unchanged even before they're updated with explicit metadata.
+Scenarios without `group`/`order`/`depends_on` default to `group: "independent"`, `order: 0`, `depends_on: []`. Existing scenarios work unchanged.
 
 ---
 
 ## 9. Complete Updated `smoke-tests.json` Structure
 
-The file remains a plain JSON array (not wrapped in a `{suite, version, scenarios}` object). This preserves the existing convention — `Factory.js` handles both formats, but changing it is a separate decision. The existing scenarios get `group` and `order` fields added:
+File remains a plain JSON array. Existing scenarios get `group` and `order` fields:
 
 ```json
 [
@@ -708,7 +699,7 @@ The file remains a plain JSON array (not wrapped in a `{suite, version, scenario
     "id": "smoke-02-sidebar-loaded",
     "group": "independent",
     "order": 2,
-    "...": "(existing fields unchanged)"
+    "...": "(renamed from smoke-02-navigate-project, behavior restored to sidebar check)"
   },
   { "...": "smoke-03 through smoke-08 from Section 4" }
 ]
@@ -720,144 +711,126 @@ The file remains a plain JSON array (not wrapped in a `{suite, version, scenario
 
 ### SPA Hydration (smoke-03, smoke-08)
 
-Direct URL navigation to Brainstormy sub-routes loads the HTML shell without React hydration/session state (documented in first-run Step 8). Mitigations:
-- smoke-03 delegates to `create_project` which handles navigation internally
-- smoke-08 uses `navigate_to_*` connector actions (in-app navigation after initial hydration, not cold page load)
-- During calibration, test whether `this.navigate()` to `/projects/{id}` works after initial app load — in-app navigation may work fine vs. cold navigation
+Direct URL navigation to Brainstormy sub-routes may fail due to SPA hydration issues (documented in first-run Step 8).
+
+**smoke-03:** `create_project` calls `this.navigate('/projects')` internally — same `page.goto()` mechanism that broke smoke-02 during first-run. This may work post-hydration if the initial `initialize()` call fully loaded the SPA shell. **Must be tested during Task 6.** If it fails, `createProject()` needs to be modified to use sidebar click navigation.
+
+**smoke-08:** Uses `navigate_to_*` actions with `this.navigate()` for in-app navigation. Same risk as smoke-03, same calibration requirement.
 
 ### AI Response Timeout (smoke-07)
 
-Highest-risk scenario — depends on OpenRouter/LLM availability. Mitigations:
-- 60s `wait_for_response` timeout, 90s scenario timeout
-- Tagged `slow` so fast pre-deploy checks can skip it
-- Simple prompt ("briefly describe a mysterious character") for fast response
-- Consider allowing 1 retry for `slow`-tagged scenarios
+Highest-risk scenario — depends on OpenRouter/LLM availability. Mitigations: 60s `wait_for_response` timeout, 90s scenario timeout, tagged `slow` for optional skipping, simple prompt for fast response.
 
 ### Selector Fragility
 
-CSS selectors break when UI changes. Mitigations:
-- Prefer `data-testid` with CSS fallbacks
-- Calibration task verifies every selector against real staging
-- Screenshot on failure captures state for diagnosis
-- `:last-of-type` instead of `:last-child` for message selectors
+Mitigations: `data-testid` preferred with CSS fallbacks, calibration task verifies every selector, screenshot on failure. Message selectors need special attention — see Section 5 calibration warning.
 
 ### Test Data Accumulation
 
-If cleanup fails or is skipped, test projects accumulate. Mitigations:
-- Timestamp in names enables age-based cleanup
-- Pre-run cleanup sweeps stale data before each suite
-- Admin dashboard allows bulk-delete of test projects
+Mitigations: timestamp naming for age-based cleanup, pre-run sweep, admin dashboard bulk-delete.
 
 ---
 
 ## 11. Implementation Task List
 
+### Task Dependency Order
+
+```
+Task 0 (bug fixes) ─────────────┐
+Task 1 (rename smoke-02) ───────┤
+Task 2 (connector changes) ─────┼──→ Task 5 (add scenarios) ──→ Task 6 (integration test)
+Task 3 (group-aware runner) ─────┤
+Task 4 (selector calibration) ──┘
+
+Task 7 (frontend data-testid) ──→ if needed based on Task 4/6 findings
+Task 8 (cleanup action) ────────→ can happen after Task 6
+```
+
+Tasks 0, 1, 2, 3 can be done in parallel or in a single session. Task 4 requires staging access. Task 5 requires Tasks 0-4 complete. Task 6 requires everything.
+
+---
+
 ### Task 0: Pre-Existing Bug Fixes (~45 min)
 
-These bugs exist independently of this spec but block scenario execution.
-
 **Task 0a: Fix `element_text_contains` assertion (30 min)**
-File: `base-agent.js:428`
-Change assertion to read `.text` property from `extractData()` return value instead of stringifying the whole object. See Section 3.1 for exact fix.
+File: `base-agent.js:418-428`
+After the existing try/catch that assigns `text`, add: `text = text?.text ?? null;`
+This extracts the `.text` property from the `{text, value, html, attributes}` object returned by `extractData()`.
 
 **Task 0b: Fix `wait` action selector resolution (15 min)**
 File: `generic-web-app/connector.js:292-294`
-Add `this.getSelector(params.selector) || params.selector` before passing to `waitFor()`. See Section 3.2 for exact fix.
+Add `this.getSelector(params.selector) || params.selector` before passing to `waitFor()`. No default timeout needed — `waitFor()` already defaults to 30000.
 
-**Validation:** Write a throwaway scenario using both `element_text_contains` and `wait` with a logical selector name. Both should resolve correctly.
+**Validation:** Write a throwaway scenario using both assertion types with logical selector names.
 
-### Task 1: Add `group`/`order` to Existing Scenarios (~15 min)
+### Task 1: Rename smoke-02 + Add Metadata (~30 min)
 
-Update `smoke-01-login` and `smoke-02-sidebar-loaded` in `smoke-tests.json` to include `"group": "independent"` and `"order"` fields. No other changes to existing scenarios.
+Rename `smoke-02-navigate-project` back to `smoke-02-sidebar-loaded` in `smoke-tests.json` and restore the validated sidebar-check behavior from first-run. The current remote version (commit 1851751) reverted the first-run rename and uses `/projects` navigation which hit SPA hydration issues.
 
-**Validation:** Run existing suite, both pass, new fields are ignored by current runner.
+Also add `"group": "independent"` and `"order"` fields to both existing scenarios.
+
+**Validation:** Run existing suite, both pass with renamed smoke-02.
 
 ### Task 2: Connector Changes (~1.5 hours)
 
 **2a: Add `navigate_to_project` action (30 min)**
-Add to `brainstormyActions` array at `connector.js:361` and implement in `performAction()` switch. Reads `current_project_id` from state when no explicit param provided.
+Add to `brainstormyActions` array at `connector.js:361` and implement in `performAction()` switch per Section 6.2.
 
-**2b: Refactor `navigate_to_session` to support direct ID (30 min)**
-Modify at `connector.js:682-694` to accept UUID and navigate directly via `this.navigate('/sessions/{id}')`, falling back to existing DOM text search for non-UUID values.
+**2b: Add state fallback to `navigate_to_story` switch case (10 min)**
+Change `params.story_id || params.name` to `params.story_id || params.name || this.getState('current_story_id')` in the switch case at `connector.js:393-394`.
 
-**2c: Add state fallback to `navigate_to_story` (10 min)**
-Add `|| this.getState('current_story_id')` to the existing ID resolution at the top of the action handler.
+**2c: Add state fallback to `navigate_to_session` switch case + UUID support (30 min)**
+Change switch case at `connector.js:397-398` to include `|| this.getState('current_session_id')`. Add UUID detection inside `navigateToSession()` method per Section 6.2.
 
 **2d: Add `last_ai_response` state to `wait_for_response` (10 min)**
-In `AIAppConnector.waitForAIResponse()` at `ai-chat-app/connector.js:192-200`, add `this.setState('last_ai_response', responseText)` after extracting the response.
+In `AIAppConnector.waitForAIResponse()` at `ai-chat-app/connector.js:184-190`, add `this.setState('last_ai_response', responseData.text || '');` after the response extraction. The `BrainstormyConnector` override calls `super` so it gets this for free.
 
-**Validation:** Unit test each action — mock page, verify correct URL navigation and state reads.
+**Validation:** Unit test each action with mock page.
 
 ### Task 3: Group-Aware Scenario Runner (~2-3 hours)
 
-Modify `BaseAgent.runTests()`:
-- Sort scenarios by `group` priority then `order`
-- Default `group: "independent"` and `order: 0` for scenarios missing these fields
-- Track `setupFailed` flag
-- Skip `test` group scenarios when setup failed, with `skipped_dependency` status
+Modify `BaseAgent.runTests()`, `BaseAgent._computeSummary()`, and `test-orchestrator.js` summary computation per Section 8.
 
-Modify `BaseAgent._computeSummary()` (base-agent.js:586-593):
-- Count `skipped_dependency` as distinct status, don't count as `failed`
-
-Modify `test-orchestrator.js` summary computation (392-436):
-- Same `skipped_dependency` awareness
-
-**Validation:** Temporarily break smoke-03 (e.g., wrong selector), run suite, verify smoke-04 through smoke-08 report `skipped_dependency` and only smoke-03 reports `failed`.
+**Validation:** Temporarily break smoke-03, run suite, verify smoke-04 through smoke-08 report `skipped_dependency` and only smoke-03 reports `failed`.
 
 ### Task 4: Add New Selectors to `app.config.json` + Calibrate (~2 hours)
 
-Add all selectors from Section 5 to `app.config.json`. Use a manual Playwright session against staging to verify each selector resolves. Update CSS values as needed.
+Add the 11 new selectors from Section 5. **Do not overwrite** the 7 existing calibrated selectors.
 
-Specific calibration steps:
-- Check for existing duplicate keys (e.g., `chatInput` may already exist)
-- Verify `:last-of-type` works for message selectors (may need JS-based selection if not)
-- Test `navigate_to_project` to determine if in-app URL navigation works post-hydration or needs sidebar click fallback
-- Where `data-testid` attributes are missing, log as frontend task (Task 7)
+Calibration checklist:
+- Verify each new selector resolves against real staging DOM
+- Determine message selector strategy (see Section 5 calibration warning)
+- Test whether `page.goto()` to `/projects/{id}` works post-hydration (determines if smoke-03/08 need connector changes)
+- Log missing `data-testid` attributes for Task 7
 
-**Deliverable:** Updated `app.config.json` with working selectors, list of missing `data-testid` attributes.
+**Deliverable:** Updated `app.config.json`, list of missing `data-testid` attributes, SPA navigation finding.
 
 ### Task 5: Add Six New Scenarios to `smoke-tests.json` (~45 min)
 
-Add the scenario JSON from Section 4 to the smoke tests file. Pre-merge checklist:
+Add scenario JSON from Section 4. Pre-merge checklist:
 - ✅ All action names are snake_case
-- ✅ All `step_succeeded` assertions use `stepIndex` (not `step`)
-- ✅ All selector references use camelCase keys matching `app.config.json`
-- ✅ File parses as valid JSON
-- ✅ Scenario IDs are unique
-- ✅ File remains a plain JSON array (no wrapper object)
+- ✅ All `step_succeeded` assertions use `stepIndex`
+- ✅ All selector references use camelCase matching `app.config.json`
+- ✅ File remains plain JSON array
+- ✅ All `depends_on` reference `smoke-02-sidebar-loaded` (post-Task 1 rename)
 
 ### Task 6: Integration Test Against Staging (~2-3 hours)
 
-Execute all 8 scenarios against Brainstormy staging. This is the iterative debugging pass. Common issues to expect:
-- Selector mismatches (calibrate from actual DOM)
-- Timing issues (add explicit waits or increase timeouts)
-- SPA navigation quirks for `navigate_to_*` actions — determine if sidebar click fallback is needed
-- AI response timeout on first run (cold LLM)
+Execute all 8 scenarios. Priority debug areas:
+- SPA hydration: does `create_project`'s internal `page.goto('/projects')` work post-hydration?
+- Message selectors: does `userMessageLast` / `assistantMessageLast` resolve correctly?
+- AI response timeout tuning
+- Timing issues (increase waits as needed)
 
-**Validation:** All 8 scenarios pass. Screenshot evidence collected for each step.
+**Validation:** All 8 scenarios pass with screenshot evidence.
 
 ### Task 7: Frontend `data-testid` Attributes (If Needed) (~1-2 hours)
 
-Based on findings from Task 4, add missing `data-testid` attributes to Brainstormy frontend components. This is a **Brainstormy codebase** task, not a QA Engine task. Priority attributes:
-
-- `chat-input`, `chat-send`, `message-list` (chat interface)
-- `user-message`, `assistant-message` (message bubbles)
-- `project-heading`, `story-heading` (page titles)
-- `session-list`, `session-item` (session navigation)
-- `new-project-button`, `new-story-button`, `new-session-button` (creation CTAs)
-
-**Validation:** Re-run suite after adding attributes, verify selectors resolve.
+Brainstormy codebase task based on Task 4/6 findings. Priority: `user-message`, `assistant-message`, `project-heading`, `story-heading`, `message-list`.
 
 ### Task 8: Implement Cleanup Action (~2-3 hours)
 
-Add `cleanupTestData` to BrainstormyConnector per Section 7. Integrate with suite lifecycle:
-- Pre-run: clean stale data (older than hold period)
-- Post-run success: log "data preserved for 1 hour" message
-- Post-run failure: log "data preserved for debugging" message
-
-**First, check:** Does Brainstormy have a `DELETE /api/projects/:id` endpoint? If yes, use `page.evaluate(fetch(...))` approach (Option A). If no, either implement a staging-only admin delete endpoint or use Playwright UI navigation (Option B).
-
-**Validation:** Run suite twice, verify first run's data is cleaned at start of second run.
+Per Section 7. First check if `DELETE /api/projects/:id` exists, then choose Option A or B.
 
 ---
 
@@ -866,7 +839,7 @@ Add `cleanupTestData` to BrainstormyConnector per Section 7. Integrate with suit
 | Task | Estimate |
 |------|----------|
 | Task 0: Pre-existing bug fixes | 45 min |
-| Task 1: Metadata on existing scenarios | 15 min |
+| Task 1: Rename smoke-02 + metadata | 30 min |
 | Task 2: Connector changes | 1.5 hours |
 | Task 3: Group-aware runner | 2-3 hours |
 | Task 4: Selector calibration | 2 hours |
@@ -875,8 +848,6 @@ Add `cleanupTestData` to BrainstormyConnector per Section 7. Integrate with suit
 | Task 7: Frontend data-testid (if needed) | 1-2 hours |
 | Task 8: Cleanup action | 2-3 hours |
 | **Total** | **~12-16 hours** |
-
-Tasks 0-2 can be done in a single focused session. Task 3 is the largest single effort and should be done independently. Tasks 4-5 are fast once selectors are calibrated. Task 6 is iterative. Tasks 7-8 can happen after core scenarios are passing.
 
 ---
 
