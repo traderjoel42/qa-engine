@@ -992,7 +992,8 @@ describe('BaseAgent', () => {
         passed: 2,
         failed: 1,
         errors: 1,
-        skipped: 1
+        skipped: 1,
+        skipped_dependency: 0
       });
     });
 
@@ -1004,7 +1005,8 @@ describe('BaseAgent', () => {
         passed: 0,
         failed: 0,
         errors: 0,
-        skipped: 0
+        skipped: 0,
+        skipped_dependency: 0
       });
     });
   });

@@ -419,7 +419,7 @@ class TestOrchestrator {
       passedScenarios += s.passed;
       failedScenarios += s.failed;
       errorScenarios += s.errors;
-      skippedScenarios += s.skipped || 0;
+      skippedScenarios += (s.skipped || 0) + (s.skipped_dependency || 0);
     }
 
     return {

@@ -83,7 +83,33 @@ class BaseAgent {
 
     const scenarios = this.getScenarios();
 
+    // Sort by group priority (independent → setup → test) then by order
+    const groupPriority = { independent: 0, setup: 1, test: 2 };
+    scenarios.sort((a, b) =>
+      (groupPriority[a.group] ?? 0) - (groupPriority[b.group] ?? 0) || (a.order ?? 0) - (b.order ?? 0)
+    );
+
+    let setupFailed = false;
+
     for (const scenario of scenarios) {
+      // If setup failed, skip remaining setup and all test scenarios
+      if (setupFailed && (scenario.group === 'setup' || scenario.group === 'test')) {
+        this._results.push({
+          scenarioId: scenario.id,
+          scenarioName: scenario.name,
+          status: 'skipped_dependency',
+          steps: [],
+          assertions: [],
+          failedSteps: [],
+          failedAssertions: [],
+          evidence: null,
+          error: null,
+          durationMs: 0,
+          timestamp: new Date().toISOString()
+        });
+        continue;
+      }
+
       let scenarioResult;
       try {
         scenarioResult = await this.runScenario(scenario);
@@ -107,6 +133,11 @@ class BaseAgent {
         };
       }
       this._results.push(scenarioResult);
+
+      // Track setup failures
+      if ((scenarioResult.status === 'failed' || scenarioResult.status === 'error') && scenario.group === 'setup') {
+        setupFailed = true;
+      }
     }
 
     this._completedAt = new Date().toISOString();
@@ -590,7 +621,8 @@ class BaseAgent {
       passed: results.filter(r => r.status === 'passed').length,
       failed: results.filter(r => r.status === 'failed').length,
       errors: results.filter(r => r.status === 'error').length,
-      skipped: results.filter(r => r.status === 'skipped').length
+      skipped: results.filter(r => r.status === 'skipped').length,
+      skipped_dependency: results.filter(r => r.status === 'skipped_dependency').length
     };
   }
 
