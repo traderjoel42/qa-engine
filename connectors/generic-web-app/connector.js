@@ -289,9 +289,12 @@ class GenericWebAppConnector extends BaseConnector {
         case 'select':
           result = await this.select(params.selector, params.value);
           break;
-        case 'wait':
-          result = await this.waitFor(params.selector, params.timeout);
+        case 'wait': {
+          const resolvedSelector = this.getSelector(params.selector) || params.selector;
+          await this.waitFor(resolvedSelector, params.timeout);
+          result = { found: true, selector: params.selector };
           break;
+        }
         case 'extract':
           result = await this.extractData(params.selector);
           break;

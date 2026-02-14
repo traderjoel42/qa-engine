@@ -379,13 +379,13 @@ describe('BaseAgent', () => {
 
     // element_text_contains
     test('element_text_contains passes when text includes value', async () => {
-      connector.extractData.mockResolvedValue('Welcome, Joel');
+      connector.extractData.mockResolvedValue({ text: 'Welcome, Joel', value: null, html: '', attributes: {} });
       const result = await agent.evaluateAssertion({ type: 'element_text_contains', selector: '#welcome', value: 'Joel' }, ctx);
       expect(result.passed).toBe(true);
     });
 
     test('element_text_contains fails when text does not include value', async () => {
-      connector.extractData.mockResolvedValue('Welcome, Joel');
+      connector.extractData.mockResolvedValue({ text: 'Welcome, Joel', value: null, html: '', attributes: {} });
       const result = await agent.evaluateAssertion({ type: 'element_text_contains', selector: '#welcome', value: 'Alice' }, ctx);
       expect(result.passed).toBe(false);
     });

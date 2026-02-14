@@ -423,6 +423,8 @@ class BaseAgent {
           } catch (_) {
             text = null;
           }
+          // extractData returns {text, value, html, attributes} — extract the .text property
+          text = text?.text ?? null;
           expected = `element "${assertion.selector}" text contains "${assertion.value}"`;
           actual = text !== null ? String(text) : 'element not found';
           passed = text !== null && String(text).includes(assertion.value);
