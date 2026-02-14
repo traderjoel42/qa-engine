@@ -20,8 +20,9 @@ npm test
 # Expected: 1842 passing
 
 # 3. Verify env vars are set
-echo $BRAINSTORMY_TEST_PASSWORD   # Must be set (qa-automation@brainstormy.co password)
 echo $CLERK_SECRET_KEY            # Must be set (staging Clerk secret for session injection)
+# Note: BRAINSTORMY_TEST_PASSWORD in app.config.json is vestigial —
+# BrainstormyConnector.authenticate() uses Clerk Backend API session injection only.
 
 # 4. Verify staging is alive (cold start may take 60-120s on Render)
 curl -s -o /dev/null -w "%{http_code}" https://brainstormy-frontend-staging.onrender.com
@@ -32,7 +33,7 @@ node -e "const c = require('./apps/brainstormy/app.config.json'); \
   console.log('App ID:', c.id); \
   console.log('URL:', c.baseUrl); \
   console.log('Selectors count:', Object.keys(c.connector.config.selectors).length);"
-# Expected: 18 selectors (7 existing + 11 new from Task 4)
+# Expected: 55 selectors (37 pre-existing + 7 calibrated in Phase 1 + 11 new from Task 4)
 ```
 
 ---
@@ -42,22 +43,26 @@ node -e "const c = require('./apps/brainstormy/app.config.json'); \
 Run the full suite once to see what the raw state looks like. Expect most new scenarios to fail on this first pass — that's the whole point of Task 6.
 
 ```bash
-# Run all smoke scenarios with verbose output + evidence collection
-node scripts/run-agent.js brainstormy healer --verbose 2>&1 | tee docs/task6-run-001.log
+# Run all smoke scenarios with evidence collection
+node cli/index.js test --app brainstormy --agent healer 2>&1 | tee docs/task6-run-001.log
 ```
+
+> **Note:** Add `docs/task6-run-*.log` to `.gitignore` to avoid committing large run logs.
+
+> **Note:** The CLI supports `--app`, `--agent`, `--mode`, and `--skip-bug-detection` flags only. There is no `--verbose`, `--scenario`, or `--group` flag — all 8 scenarios run together as a suite. To debug individual scenarios, temporarily comment out others in `smoke-tests.json`.
 
 **What to capture from this first run:**
 - Which scenarios pass (likely smoke-01, smoke-02 from prior validation)
 - Which scenarios fail and at which step
 - Error messages — especially selector-related errors (`waitForSelector`, `no element found`)
-- Screenshots in the evidence directory (check `evidence/` or `data/evidence/`)
+- Screenshots in the evidence directory (check `evidence/brainstormy/` for per-run subdirectories)
 - Any timeout errors (especially smoke-07 AI response)
 
 **Log the results immediately:**
 
 ```bash
 # Append initial findings to the log file
-cat >> docs/expanded-smoke-scenarios-log.md << 'EOF'
+cat >> docs/expanded-smoke-scenarios-log.md << EOF
 
 ## Task 6: Integration Test Run Log
 
@@ -98,6 +103,8 @@ npx playwright open https://brainstormy-frontend-staging.onrender.com
 
 **If headed mode isn't available (e.g., headless-only server), use a script:**
 
+> **⚠️ Note:** This script does NOT perform Clerk authentication. Only pre-auth selectors (login page elements) will be testable. For post-auth selectors (project headings, message containers, etc.), either replicate the connector's `authenticate()` flow from `connectors/brainstormy/connector.js:166` using Clerk Backend API session injection, or — more practically — run the full test suite once and examine the screenshots in `evidence/brainstormy/` to see selector failures in authenticated context.
+
 ```javascript
 // scripts/inspect-selectors.js
 const { chromium } = require('playwright');
@@ -107,7 +114,8 @@ const appConfig = require('../apps/brainstormy/app.config.json');
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   
-  // Navigate to staging (handle Clerk auth the same way connector does)
+  // Navigate to staging — NOTE: this only tests pre-auth selectors
+  // For post-auth selectors, add Clerk session injection (see connector.js:166)
   await page.goto(appConfig.baseUrl);
   await page.waitForTimeout(5000); // Wait for SPA hydration
   
@@ -131,11 +139,11 @@ const appConfig = require('../apps/brainstormy/app.config.json');
   }
   
   // Take a screenshot for reference
-  await page.screenshot({ path: 'evidence/selector-calibration.png', fullPage: true });
+  await page.screenshot({ path: 'evidence/brainstormy/selector-calibration.png', fullPage: true });
   
   // Dump the full DOM structure for analysis
   const bodyHTML = await page.evaluate(() => document.body.innerHTML);
-  require('fs').writeFileSync('evidence/staging-dom-dump.html', bodyHTML);
+  require('fs').writeFileSync('evidence/brainstormy/staging-dom-dump.html', bodyHTML);
   
   await browser.close();
 })();
@@ -164,9 +172,10 @@ await page.$$eval('h1, h2, h3', els =>
 await page.$$eval('[class*="message"], [class*="Message"]', els => 
   els.map(e => `<${e.tagName}> class="${e.className}" role="${e.getAttribute('role')}"`));
 
-// 4. Check breadcrumb structure (critical for smoke-08)
-await page.$$eval('[class*="breadcrumb"], [class*="Breadcrumb"], nav a', els => 
-  els.map(e => `<${e.tagName}> class="${e.className}" href="${e.getAttribute('href')}" text="${e.textContent}"`));
+// 4. Check sidebar navigation elements (smoke-08 uses navigate_to_project/story/session
+//    actions with wait steps, NOT breadcrumbs — breadcrumb selectors were removed in spec v1.2)
+await page.$$eval('nav a, aside a, [class*="sidebar"] a, [class*="Sidebar"] a', els => 
+  els.map(e => `<${e.tagName}> class="${e.className}" href="${e.getAttribute('href')}" text="${e.textContent.substring(0, 40)}"`));
 ```
 
 ### Step 2c: Known Problem Areas & Likely Fixes
@@ -207,14 +216,15 @@ await page.$$eval('h1, h2, [class*="title"], [class*="Title"], [class*="heading"
   els.map(e => `<${e.tagName}> class="${e.className}" text="${e.textContent.substring(0, 40)}"`));
 ```
 
-**4. `breadcrumbProject` / `breadcrumbStory` / `breadcrumbSession`**
+**4. Sidebar Navigation (smoke-08)**
 
-Brainstormy may not use traditional breadcrumbs. Navigation might be sidebar-based. Check if the hierarchy navigation in smoke-08 should use sidebar links instead of breadcrumbs:
+smoke-08 uses `navigate_to_project`, `navigate_to_story`, and `navigate_to_session` actions (implemented in Task 2), which navigate by UUID URL. Breadcrumb selectors were removed in spec v1.2. Verify the wait selectors used between navigation steps resolve correctly:
 
 ```javascript
-// Look for sidebar navigation elements
-await page.$$eval('nav a, aside a, [class*="sidebar"] a, [class*="Sidebar"] a', els =>
-  els.map(e => `<${e.tagName}> class="${e.className}" href="${e.getAttribute('href')}" text="${e.textContent.substring(0, 40)}"`));
+// Check what loads after navigating to a project/story/session URL
+// These are the elements the wait steps look for between navigations
+await page.$$eval('[class*="project"], [class*="story"], [class*="session"]', els =>
+  els.map(e => `<${e.tagName}> class="${e.className}" text="${e.textContent.substring(0, 40)}"`));
 ```
 
 ### Step 2d: Update app.config.json
@@ -236,7 +246,7 @@ git commit -m "Task 6: Calibrate selectors against staging DOM (run 001)"
 git push
 
 # Re-run to verify
-node scripts/run-agent.js brainstormy healer --verbose 2>&1 | tee docs/task6-run-002.log
+node cli/index.js test --app brainstormy --agent healer 2>&1 | tee docs/task6-run-002.log
 ```
 
 ---
@@ -297,27 +307,32 @@ const { chromium } = require('playwright');
 })();
 ```
 
-**If `page.goto()` breaks hydration**, the fix is to change `createProject`'s implementation in the connector to use sidebar/SPA navigation instead:
+**If `page.goto()` breaks hydration**, the fix is to change `createProject`'s implementation in the connector to use sidebar/SPA navigation instead. The actual code at `connectors/brainstormy/connector.js:468` calls `this.navigate('/projects')`, which internally uses `page.goto()` (at `connectors/generic-web-app/connector.js:225`). The fix should either:
 
+**Option A — Override `createProject` to use SPA click navigation:**
 ```javascript
 // In connectors/brainstormy/connector.js, createProject method
-// BEFORE (if using page.goto):
+// BEFORE (current code):
 async createProject(name) {
-  await this.page.goto(`${this.baseUrl}/projects`);
+  await this.navigate('/projects');
   // ...
 }
 
-// AFTER (use SPA navigation):
+// AFTER (use SPA navigation via sidebar click):
 async createProject(name) {
-  // Click sidebar link or use React Router navigation
   const projectsLink = await this.page.$('a[href="/projects"]');
   if (projectsLink) {
     await projectsLink.click();
     await this.page.waitForLoadState('networkidle');
+  } else {
+    // Fallback to full navigation if sidebar link not found
+    await this.navigate('/projects');
   }
   // ... rest of creation logic
 }
 ```
+
+**Option B — Add a `navigateSPA` method to GenericWebAppConnector** that tries click-based navigation before falling back to `page.goto()`. This benefits all connectors, not just Brainstormy.
 
 ---
 
@@ -357,28 +372,35 @@ Based on what the DOM looks like, choose one:
 **Option C — Nth-child approach (if messages alternate in a flat list):**
 Need JavaScript evaluation instead of CSS selector. This would require modifying the `element_exists` and `element_text_contains` assertion handlers to support JS evaluation, or adding a custom assertion type.
 
-**Option D — Use `page.evaluate()` in the connector:**
-If CSS selectors are insufficient, modify `waitForAIResponse` in AIAppConnector to use JavaScript to find the last assistant message:
+**Option D — Use `page.evaluate()` for the selector only (targeted fix):**
+If CSS selectors are insufficient, do NOT replace the full `waitForAIResponse` method — the existing implementation at `ai-chat-app/connector.js:151-217` has critical logic for new-message counting, streaming-complete detection, conversation tracking, and html extraction. Instead, modify only the selector resolution to use JS evaluation:
 
 ```javascript
-async waitForAIResponse(timeout = 60000) {
-  // Wait for generating indicator to disappear
-  await this.page.waitForSelector(
-    this.getSelector('generatingIndicator'), 
-    { state: 'hidden', timeout }
-  ).catch(() => {}); // May not appear if response is fast
-  
-  // Use evaluate to find last assistant message
-  const response = await this.page.evaluate(() => {
-    const messages = document.querySelectorAll('[data-role="assistant"], .assistant-message');
-    const last = messages[messages.length - 1];
-    return last ? last.textContent : null;
+// In ai-chat-app/connector.js, modify ONLY the message-counting helper
+// The existing code counts messages to detect when a new one appears.
+// If CSS can't select by role, use page.evaluate() for the count:
+
+const getAssistantMessageCount = async () => {
+  return await this.page.evaluate(() => {
+    // Adapt this selector to match the actual DOM structure found in Phase 4a
+    const msgs = document.querySelectorAll('[data-role="assistant"], .assistant-message');
+    return msgs.length;
   });
-  
-  this.setState('last_ai_response', response);
-  return { text: response };
-}
+};
+
+// Similarly for extracting the last assistant message text:
+const getLastAssistantText = async () => {
+  return await this.page.evaluate(() => {
+    const msgs = document.querySelectorAll('[data-role="assistant"], .assistant-message');
+    const last = msgs[msgs.length - 1];
+    return last ? { text: last.textContent, html: last.innerHTML } : null;
+  });
+};
+
+// Wire these into the EXISTING waitForAIResponse flow — do not replace the method.
 ```
+
+> **⚠️ Warning:** The existing `waitForAIResponse` (lines 151-217) counts messages before/after to detect new responses, waits for streaming to complete, extracts both text and html, and tracks conversation history. Replacing the entire method would regress all of this. Only modify the selector/counting mechanism.
 
 ---
 
@@ -433,7 +455,7 @@ const { chromium } = require('playwright');
 In `smoke-tests.json`:
 - `smoke-07` scenario timeout: Start at 90s, increase to 120s if AI typically takes 40-60s
 - `waitForAIResponse` params: Start at 60s, increase to 90s if needed
-- Consider adding `retries: 1` to smoke-07 if timeout failures are intermittent
+- ~~Consider adding `retries: 1` to smoke-07 if timeout failures are intermittent~~ — **Note:** `retries` is not currently supported by `BaseAgent.runTests()`. If intermittent timeouts are a problem, increase the timeout instead or add retry logic to the runner as a future enhancement.
 
 In `app.config.json`:
 ```json
@@ -506,9 +528,9 @@ Repeat this cycle until all 8 scenarios pass:
 ```
 ┌─────────────────────────────┐
 │ 1. Run suite                │
-│    node scripts/run-agent.js │
-│    brainstormy healer       │
-│    --verbose                │
+│    node cli/index.js test   │
+│    --app brainstormy        │
+│    --agent healer           │
 └──────────┬──────────────────┘
            │
            ▼
@@ -628,23 +650,23 @@ Once all 8 scenarios pass consistently (run the suite 2-3 times to confirm stabi
 | `apps/brainstormy/scenarios/smoke-tests.json` | All 8 scenario definitions |
 | `connectors/brainstormy/connector.js` | BrainstormyConnector actions |
 | `connectors/ai-chat-app/connector.js` | AIAppConnector (sendMessage, waitForAIResponse) |
-| `connectors/generic/connector.js` | GenericWebAppConnector (navigate, click, wait) |
-| `agents/healer/agent.js` | BaseAgent scenario execution |
-| `core/engine/scenario-runner.js` | Group-aware scenario runner |
+| `connectors/generic-web-app/connector.js` | GenericWebAppConnector (navigate, click, wait) |
+| `agents/base-agent.js` | BaseAgent scenario execution + group-aware runner (lines 80-135) |
+| `agents/healer/agent.js` | HealerAgent (extends BaseAgent) |
 | `docs/expanded-smoke-scenarios-log.md` | Debug log (append findings here) |
-| `evidence/` | Screenshots and DOM dumps |
+| `evidence/brainstormy/` | Screenshots and DOM dumps (per-run subdirectories) |
 
 ## Quick Reference: Run Commands
 
 ```bash
 # Full suite
-node scripts/run-agent.js brainstormy healer --verbose
+node cli/index.js test --app brainstormy --agent healer
 
-# Single scenario (if runner supports --scenario flag)
-node scripts/run-agent.js brainstormy healer --scenario smoke-03-create-project --verbose
+# Full suite, skip bug detection (faster iteration)
+node cli/index.js test --app brainstormy --agent healer --skip-bug-detection
 
-# Just the independent group (quick smoke)
-node scripts/run-agent.js brainstormy healer --group independent --verbose
+# To run a single scenario: temporarily comment out others in
+# apps/brainstormy/scenarios/smoke-tests.json (no --scenario flag exists)
 
 # Unit tests (run after any code changes)
 npm test
