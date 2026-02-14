@@ -118,3 +118,98 @@
 - All 1842 tests pass (`npm test`)
 
 ---
+
+## Task 6: Integration Test Against Staging ✅
+
+**Status:** Complete — 8/8 passing, 3 consecutive green runs
+
+### Run 001 — Initial Baseline
+**Date:** 2026-02-14
+**Commit:** `159b4e9` (Task 5)
+
+| Scenario | Status | Duration | Notes |
+|----------|--------|----------|-------|
+| smoke-01-login | ❌ | timeout | `page.goto` navigate timeout (90s) — Render cold start |
+| smoke-02-sidebar-loaded | ❌ | timeout | Same navigate timeout |
+| smoke-03-create-project | ❌ | error | SPA crash on `page.goto('/projects')` |
+| smoke-04 through smoke-08 | ⏭️ | skipped | Dependency cascade |
+
+**Result:** 0/8 passed
+**Fix:** Increased navigate timeout to 120s in GenericWebAppConnector
+
+### Run 002 — Navigate Fix
+**Date:** 2026-02-14
+
+| Scenario | Status | Duration | Notes |
+|----------|--------|----------|-------|
+| smoke-01-login | ✅ | ~5s | |
+| smoke-02-sidebar-loaded | ❌ | error | `[data-testid='sidebar-projects']` not found — no data-testid in DOM |
+| smoke-03-create-project | ❌ | error | SPA crash: `page.goto('/projects')` kills React |
+| smoke-04 through smoke-08 | ⏭️ | skipped | Dependency cascade |
+
+**Result:** 1/8 passed
+**Findings:** Zero data-testid attributes in staging DOM. All selectors need CSS class calibration. Creation flow uses 2-step modal, not `/projects` route.
+
+### Run 003 — Full Selector & Connector Rewrite
+**Date:** 2026-02-14
+**Commit:** `d54e491`
+**Changes:** Rewrote all 55+ selectors to CSS classes. Rewrote `createProject()` for 2-step modal. Adapted create/navigate methods for `/chat/{uuid}` URLs. Added `dismissOverlays()`.
+
+| Scenario | Status | Duration | Notes |
+|----------|--------|----------|-------|
+| smoke-01-login | ✅ | ~5s | |
+| smoke-02-sidebar-loaded | ✅ | ~4s | |
+| smoke-03-create-project | ✅ | ~12s | |
+| smoke-04-create-story | ✅ | ~0.5s | Auto-creation returns existing |
+| smoke-05-create-session | ✅ | ~0.5s | Auto-creation returns existing |
+| smoke-06-send-message | ❌ | 30s | Chat readonly without API key |
+| smoke-07-ai-response | ❌ | 120s | Same — no OpenRouter API key configured |
+| smoke-08-hierarchy-navigation | ✅ | ~8s | |
+
+**Result:** 6/8 passed
+**Findings:** Chat requires OpenRouter API key. `BRAINSTORMY_OPENROUTER_KEY` exists in `.env`.
+
+### Run 004 — API Key + Chat Selector Fixes
+**Date:** 2026-02-14
+**Changes:** Added `configureApiKey()` method. Fixed `chatSend` (`.message-input__button`), `chatInput` (`.message-input__textarea`), `userMessageLast`/`assistantMessageLast` (removed `:last-child`). Added wait steps before send_message.
+
+| Scenario | Status | Duration | Notes |
+|----------|--------|----------|-------|
+| smoke-01-login | ✅ | ~5s | |
+| smoke-02-sidebar-loaded | ✅ | ~5s | |
+| smoke-03-create-project | ✅ | ~12s | |
+| smoke-04-create-story | ✅ | ~0.5s | |
+| smoke-05-create-session | ✅ | ~0.5s | |
+| smoke-06-send-message | ✅ | ~2.4s | |
+| smoke-07-ai-response | ✅ | ~16s | |
+| smoke-08-hierarchy-navigation | ✅ | ~11s | |
+
+**Result:** 8/8 passed
+
+### Run 005 & 006 — Stability Confirmation
+**Date:** 2026-02-14
+
+| Run | Result | smoke-07 Duration | Total Duration |
+|-----|--------|-------------------|----------------|
+| 005 | 8/8 ✅ | 15818ms | ~53s |
+| 006 | 8/8 ✅ | 17467ms | ~56s |
+
+**3 consecutive green runs confirmed.**
+
+---
+
+## Phase 7: Post-Stabilization Assessment
+
+### Task 7 Assessment: Frontend data-testid Attributes
+
+All selectors use stable BEM class naming conventions. Only `userMenu` (Clerk's `.cl-userButtonTrigger`) is genuinely fragile as a third-party dependency.
+
+**Recommendation:** Task 7 can be **deferred**. CSS selectors are sufficiently stable for ongoing test execution.
+
+### Task 8 Assessment: Cleanup Action
+
+Test data accumulation: ~1 project per run, identifiable by `QA Smoke Test Project` + timestamp prefix.
+
+**Recommendation:** Task 8 is **low priority**. Test data accumulation is modest and doesn't interfere with execution. Implement when project count becomes a concern.
+
+---

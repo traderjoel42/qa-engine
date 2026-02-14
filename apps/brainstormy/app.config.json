@@ -40,8 +40,8 @@
         "sessionList": ".nav-vertical__children",
         "sessionItem": ".sidebar-item, .book-item",
         "endSessionButton": "button:has-text('End Session')",
-        "chatInput": ".message-input textarea",
-        "chatSend": ".message-input__send, button[aria-label='Send']",
+        "chatInput": ".message-input__textarea",
+        "chatSend": ".message-input__button",
         "aiMessage": ".chat-message--assistant",
         "userMessage": ".chat-message--user",
         "generatingIndicator": ".chat-message--streaming, .streaming-indicator",
@@ -77,10 +77,15 @@
         "storyCard": ".nav-vertical__section",
 
         "messageList": ".message-list",
-        "userMessageLast": ".chat-message--user:last-child",
-        "assistantMessageLast": ".chat-message--assistant:last-child",
+        "userMessageLast": ".chat-message--user",
+        "assistantMessageLast": ".chat-message--assistant",
         "messageInput": ".message-input",
-        "messageCounter": ".chat-interface__message-counter"
+        "messageCounter": ".chat-interface__message-counter",
+
+        "settingsButton": ".brainstormy-sidebar__settings-btn",
+        "apiKeyInput": "input.api-key-input",
+        "saveApiKeyButton": ".save-api-key-btn",
+        "apiKeyStatus": ".status-indicator"
       },
       "timeouts": {
         "navigation": 90000,

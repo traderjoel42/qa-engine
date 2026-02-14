@@ -151,8 +151,12 @@
     "order": 6,
     "depends_on": ["smoke-05-create-session"],
     "tags": ["smoke", "chat", "message"],
-    "timeout": 30000,
+    "timeout": 60000,
     "steps": [
+      {
+        "action": "wait",
+        "params": { "selector": "chatInput", "timeout": 15000 }
+      },
       {
         "action": "send_message",
         "params": {
@@ -163,7 +167,7 @@
     "assertions": [
       {
         "type": "step_succeeded",
-        "stepIndex": 0,
+        "stepIndex": 1,
         "message": "send_message action should complete without error"
       },
       {
@@ -184,6 +188,10 @@
     "timeout": 120000,
     "steps": [
       {
+        "action": "wait",
+        "params": { "selector": "chatInput", "timeout": 15000 }
+      },
+      {
         "action": "send_message",
         "params": {
           "text": "QA test: briefly describe a mysterious character who runs a speakeasy."
@@ -197,7 +205,7 @@
     "assertions": [
       {
         "type": "step_succeeded",
-        "stepIndex": 1,
+        "stepIndex": 2,
         "message": "wait_for_response should complete within timeout"
       },
       {

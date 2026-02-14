@@ -145,6 +145,9 @@ class BrainstormyConnector extends AIAppConnector {
     // Dismiss any engagement/welcome overlays
     await this.dismissOverlays();
 
+    // Configure OpenRouter API key if available (needed for chat tests)
+    await this.configureApiKey();
+
     await this.collectEvidence('authenticated_ready');
 
     this._initialized = true;
@@ -1188,6 +1191,100 @@ class BrainstormyConnector extends AIAppConnector {
       // Citations are supplementary — don't fail the test
       return [];
     }
+  }
+
+  // ===================================================================
+  // API KEY CONFIGURATION
+  // ===================================================================
+
+  /**
+   * Configure the OpenRouter API key via the settings dialog.
+   *
+   * Reads the key from the BRAINSTORMY_OPENROUTER_KEY environment variable.
+   * If not set, logs a warning and returns (chat-dependent tests will fail).
+   * If already configured, skips reconfiguration.
+   *
+   * @returns {Promise<void>}
+   */
+  async configureApiKey() {
+    const apiKey = process.env.BRAINSTORMY_OPENROUTER_KEY;
+    if (!apiKey) {
+      console.warn('  BRAINSTORMY_OPENROUTER_KEY not set — chat tests will fail');
+      return;
+    }
+
+    // Check if API key is already configured (status indicator)
+    const statusIndicator = this.getSelector('apiKeyStatus');
+    if (statusIndicator) {
+      try {
+        const statusText = await this.page.$eval(statusIndicator, el => el.textContent);
+        if (statusText && !statusText.toLowerCase().includes('not set') && !statusText.toLowerCase().includes('not configured')) {
+          console.log('  API key already configured, skipping');
+          return;
+        }
+      } catch {
+        // Status indicator not visible yet — proceed with configuration
+      }
+    }
+
+    console.log('  Configuring OpenRouter API key...');
+
+    // Open settings dialog
+    const settingsBtn = this.getSelector('settingsButton');
+    try {
+      await this.page.waitForSelector(settingsBtn, { timeout: 5000 });
+      await this.click(settingsBtn);
+      await this.page.waitForTimeout(1500);
+    } catch {
+      console.warn('  Settings button not found — skipping API key configuration');
+      return;
+    }
+
+    // Fill the API key input
+    const apiKeyInput = this.getSelector('apiKeyInput');
+    try {
+      await this.page.waitForSelector(apiKeyInput, { timeout: 5000 });
+      // Clear existing value and type the new key
+      await this.page.fill(apiKeyInput, '');
+      await this.page.fill(apiKeyInput, apiKey);
+      // Wait for React to process the change and enable the save button
+      await this.page.waitForTimeout(1000);
+    } catch {
+      console.warn('  API key input not found in settings dialog');
+      await this.page.keyboard.press('Escape');
+      return;
+    }
+
+    // Click Save & Verify (button is disabled until input has a value)
+    const saveBtn = this.getSelector('saveApiKeyButton');
+    try {
+      // Wait for the button to become enabled
+      await this.page.waitForSelector(`${saveBtn}:not([disabled])`, { timeout: 5000 });
+      await this.page.click(saveBtn);
+      await this.page.waitForTimeout(5000); // Wait for API key verification
+
+      // Check if verification succeeded
+      if (statusIndicator) {
+        const newStatus = await this.page.$eval(statusIndicator, el => el.textContent).catch(() => '');
+        console.log(`  API key status: ${newStatus.trim()}`);
+      }
+    } catch (err) {
+      console.warn(`  Save API key button issue: ${err.message?.substring(0, 80)}`);
+    }
+
+    // Close settings dialog via Done button or Escape
+    try {
+      const doneBtn = await this.page.$('.settings-done-btn');
+      if (doneBtn) {
+        await doneBtn.click();
+      } else {
+        await this.page.keyboard.press('Escape');
+      }
+    } catch {
+      await this.page.keyboard.press('Escape');
+    }
+    await this.page.waitForTimeout(500);
+    await this.dismissOverlays();
   }
 
   // ===================================================================
