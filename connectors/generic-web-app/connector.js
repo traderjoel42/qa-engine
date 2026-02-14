@@ -223,7 +223,7 @@ class GenericWebAppConnector extends BaseConnector {
 
     try {
       await this.page.goto(url);
-      await this.waitForNavigation();
+      await this.waitForNavigation(this.getTimeout('navigation'));
     } catch (error) {
       throw this._wrapPlaywrightError(error, {
         action: 'navigate',

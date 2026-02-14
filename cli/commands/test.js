@@ -46,10 +46,29 @@ module.exports = function testCommand(program) {
         if (result.connectorError) {
           console.log(`  Error:   [${result.connectorError.phase}] ${result.connectorError.message}`);
         }
-        // Print agent errors if any
+        // Print per-scenario results
         for (const ar of (result.agentResults || [])) {
           if (ar.error) {
             console.log(`  Agent ${ar.agentId} error: ${ar.error.message}`);
+          }
+          if (ar.scenarios && ar.scenarios.length > 0) {
+            console.log(`\n  Agent: ${ar.agentId}`);
+            for (const sc of ar.scenarios) {
+              const icon = sc.status === 'passed' ? '✅' : sc.status === 'skipped_dependency' ? '⏭️' : '❌';
+              const dur = sc.durationMs ? ` (${sc.durationMs}ms)` : '';
+              console.log(`    ${icon} ${sc.scenarioId}: ${sc.status}${dur}`);
+              if (sc.status === 'failed' || sc.status === 'error') {
+                for (const fs of (sc.failedSteps || [])) {
+                  console.log(`       Step ${fs.stepIndex} [${fs.action}]: ${fs.error?.message || 'failed'}`);
+                }
+                for (const fa of (sc.failedAssertions || [])) {
+                  console.log(`       Assertion: ${fa.message || fa.type} — expected: ${fa.expected}, actual: ${fa.actual}`);
+                }
+                if (sc.error) {
+                  console.log(`       Error: ${sc.error.message || sc.error}`);
+                }
+              }
+            }
           }
         }
         const s = result.summary || {};
