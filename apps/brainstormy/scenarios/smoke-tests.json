@@ -45,5 +45,239 @@
         "message": "Sidebar projects link should be visible"
       }
     ]
+  },
+  {
+    "id": "smoke-03-create-project",
+    "name": "Create a new project",
+    "description": "Creates a test project and verifies it appears in the UI",
+    "group": "setup",
+    "order": 3,
+    "depends_on": ["smoke-02-sidebar-loaded"],
+    "tags": ["smoke", "crud", "project"],
+    "timeout": 30000,
+    "steps": [
+      {
+        "action": "create_project",
+        "params": { "name": "QA Smoke Test Project {{timestamp}}" }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "url_contains",
+        "value": "/projects/",
+        "message": "Should redirect to the new project page"
+      },
+      {
+        "type": "state_truthy",
+        "key": "current_project_id",
+        "message": "Connector state should have current_project_id"
+      },
+      {
+        "type": "element_exists",
+        "selector": "projectHeading",
+        "message": "Project heading should be visible"
+      }
+    ]
+  },
+  {
+    "id": "smoke-04-create-story",
+    "name": "Create a story within a project",
+    "description": "Creates a novel story inside the test project",
+    "group": "setup",
+    "order": 4,
+    "depends_on": ["smoke-03-create-project"],
+    "tags": ["smoke", "crud", "story"],
+    "timeout": 30000,
+    "steps": [
+      {
+        "action": "create_story",
+        "params": {
+          "name": "QA Smoke Test Story {{timestamp}}",
+          "vertical": "novel"
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "url_contains",
+        "value": "/stories/",
+        "message": "Should redirect to the new story page"
+      },
+      {
+        "type": "state_truthy",
+        "key": "current_story_id",
+        "message": "Connector state should have current_story_id"
+      },
+      {
+        "type": "element_exists",
+        "selector": "storyHeading",
+        "message": "Story heading should be visible"
+      }
+    ]
+  },
+  {
+    "id": "smoke-05-create-session",
+    "name": "Create an Explore session",
+    "description": "Creates an Explore-mode session and verifies chat interface loads",
+    "group": "setup",
+    "order": 5,
+    "depends_on": ["smoke-04-create-story"],
+    "tags": ["smoke", "crud", "session"],
+    "timeout": 30000,
+    "steps": [
+      {
+        "action": "create_session",
+        "params": { "type": "explore" }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "url_contains",
+        "value": "/sessions/",
+        "message": "Should redirect to the new session page"
+      },
+      {
+        "type": "state_truthy",
+        "key": "current_session_id",
+        "message": "Connector state should have current_session_id"
+      },
+      {
+        "type": "element_exists",
+        "selector": "chatInput",
+        "message": "Chat input should be visible (session is active)"
+      },
+      {
+        "type": "element_exists",
+        "selector": "messageList",
+        "message": "Message list container should exist"
+      }
+    ]
+  },
+  {
+    "id": "smoke-06-send-message",
+    "name": "Send a user message",
+    "description": "Types and sends a message, verifies it appears in the chat",
+    "group": "test",
+    "order": 6,
+    "depends_on": ["smoke-05-create-session"],
+    "tags": ["smoke", "chat", "message"],
+    "timeout": 15000,
+    "steps": [
+      {
+        "action": "send_message",
+        "params": {
+          "text": "Hello, this is a QA smoke test message. Let's brainstorm a story about a detective in 1920s Chicago."
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "step_succeeded",
+        "stepIndex": 0,
+        "message": "send_message action should complete without error"
+      },
+      {
+        "type": "element_exists",
+        "selector": "userMessageLast",
+        "message": "User message should appear in the chat"
+      }
+    ]
+  },
+  {
+    "id": "smoke-07-ai-response",
+    "name": "Receive an AI response",
+    "description": "Sends a message and waits for the AI to respond. Validates the response renders in chat.",
+    "group": "test",
+    "order": 7,
+    "depends_on": ["smoke-05-create-session"],
+    "tags": ["smoke", "chat", "ai", "slow"],
+    "timeout": 90000,
+    "steps": [
+      {
+        "action": "send_message",
+        "params": {
+          "text": "QA test: briefly describe a mysterious character who runs a speakeasy."
+        }
+      },
+      {
+        "action": "wait_for_response",
+        "params": { "timeout": 60000 }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "step_succeeded",
+        "stepIndex": 1,
+        "message": "wait_for_response should complete within timeout"
+      },
+      {
+        "type": "element_exists",
+        "selector": "assistantMessageLast",
+        "message": "An assistant message should appear in the chat"
+      },
+      {
+        "type": "state_truthy",
+        "key": "last_ai_response",
+        "message": "Connector state should store the AI response text"
+      }
+    ]
+  },
+  {
+    "id": "smoke-08-hierarchy-navigation",
+    "name": "Navigate project → story → session hierarchy",
+    "description": "Navigates up to project level, back down to story, then to session, verifying each level loads correctly.",
+    "group": "test",
+    "order": 8,
+    "depends_on": ["smoke-05-create-session"],
+    "tags": ["smoke", "navigation", "hierarchy"],
+    "timeout": 45000,
+    "steps": [
+      {
+        "action": "navigate_to_project",
+        "params": {}
+      },
+      {
+        "action": "wait",
+        "params": { "selector": "storyList", "timeout": 10000 }
+      },
+      {
+        "action": "navigate_to_story",
+        "params": {}
+      },
+      {
+        "action": "wait",
+        "params": { "selector": "sessionList", "timeout": 10000 }
+      },
+      {
+        "action": "navigate_to_session",
+        "params": {}
+      },
+      {
+        "action": "wait",
+        "params": { "selector": "chatInput", "timeout": 10000 }
+      }
+    ],
+    "assertions": [
+      {
+        "type": "step_succeeded",
+        "stepIndex": 0,
+        "message": "navigate_to_project should complete"
+      },
+      {
+        "type": "step_succeeded",
+        "stepIndex": 2,
+        "message": "navigate_to_story should complete"
+      },
+      {
+        "type": "step_succeeded",
+        "stepIndex": 4,
+        "message": "navigate_to_session should complete"
+      },
+      {
+        "type": "element_exists",
+        "selector": "chatInput",
+        "message": "Chat interface should be visible at the end"
+      }
+    ]
   }
 ]
