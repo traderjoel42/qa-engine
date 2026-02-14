@@ -4,6 +4,8 @@
     "name": "Login and Dashboard Load",
     "description": "Verify Clerk authentication and dashboard render",
     "mode": "smoke",
+    "group": "independent",
+    "order": 1,
     "steps": [
       {
         "action": "navigate",
@@ -24,21 +26,23 @@
     ]
   },
   {
-    "id": "smoke-02-navigate-project",
-    "name": "Navigate to Test Project",
-    "description": "Verify project page loads and displays content",
+    "id": "smoke-02-sidebar-loaded",
+    "name": "Sidebar Loaded",
+    "description": "Verify app sidebar renders after authentication",
     "mode": "smoke",
+    "group": "independent",
+    "order": 2,
     "steps": [
       {
         "action": "navigate",
-        "params": { "path": "/projects" }
+        "params": { "path": "/" }
       }
     ],
     "assertions": [
       {
         "type": "element_exists",
-        "selector": "newProjectButton",
-        "message": "New project button should be visible on projects page"
+        "selector": "sidebarProjects",
+        "message": "Sidebar projects link should be visible"
       }
     ]
   }
