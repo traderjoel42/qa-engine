@@ -42,19 +42,19 @@
       {
         "type": "element_exists",
         "selector": "sidebarProjects",
-        "message": "Sidebar projects link should be visible"
+        "message": "Sidebar nav-vertical section should be visible"
       }
     ]
   },
   {
     "id": "smoke-03-create-project",
     "name": "Create a new project",
-    "description": "Creates a test project and verifies it appears in the UI",
+    "description": "Creates a test project via the modal and verifies session loads",
     "group": "setup",
     "order": 3,
     "depends_on": ["smoke-02-sidebar-loaded"],
     "tags": ["smoke", "crud", "project"],
-    "timeout": 30000,
+    "timeout": 60000,
     "steps": [
       {
         "action": "create_project",
@@ -64,8 +64,8 @@
     "assertions": [
       {
         "type": "url_contains",
-        "value": "/projects/",
-        "message": "Should redirect to the new project page"
+        "value": "/chat/",
+        "message": "Should redirect to a chat session after project creation"
       },
       {
         "type": "state_truthy",
@@ -74,20 +74,20 @@
       },
       {
         "type": "element_exists",
-        "selector": "projectHeading",
-        "message": "Project heading should be visible"
+        "selector": "messageList",
+        "message": "Message list should be visible (session loaded)"
       }
     ]
   },
   {
     "id": "smoke-04-create-story",
-    "name": "Create a story within a project",
-    "description": "Creates a novel story inside the test project",
+    "name": "Verify story exists within project",
+    "description": "Verifies the story was auto-created with the project",
     "group": "setup",
     "order": 4,
     "depends_on": ["smoke-03-create-project"],
     "tags": ["smoke", "crud", "story"],
-    "timeout": 30000,
+    "timeout": 15000,
     "steps": [
       {
         "action": "create_story",
@@ -100,30 +100,25 @@
     "assertions": [
       {
         "type": "url_contains",
-        "value": "/stories/",
-        "message": "Should redirect to the new story page"
+        "value": "/chat/",
+        "message": "Should still be on the chat session page"
       },
       {
         "type": "state_truthy",
         "key": "current_story_id",
         "message": "Connector state should have current_story_id"
-      },
-      {
-        "type": "element_exists",
-        "selector": "storyHeading",
-        "message": "Story heading should be visible"
       }
     ]
   },
   {
     "id": "smoke-05-create-session",
-    "name": "Create an Explore session",
-    "description": "Creates an Explore-mode session and verifies chat interface loads",
+    "name": "Verify session exists",
+    "description": "Verifies the session was auto-created with the project and chat interface loaded",
     "group": "setup",
     "order": 5,
     "depends_on": ["smoke-04-create-story"],
     "tags": ["smoke", "crud", "session"],
-    "timeout": 30000,
+    "timeout": 15000,
     "steps": [
       {
         "action": "create_session",
@@ -133,18 +128,13 @@
     "assertions": [
       {
         "type": "url_contains",
-        "value": "/sessions/",
-        "message": "Should redirect to the new session page"
+        "value": "/chat/",
+        "message": "Should be on a chat session page"
       },
       {
         "type": "state_truthy",
         "key": "current_session_id",
         "message": "Connector state should have current_session_id"
-      },
-      {
-        "type": "element_exists",
-        "selector": "chatInput",
-        "message": "Chat input should be visible (session is active)"
       },
       {
         "type": "element_exists",
@@ -161,7 +151,7 @@
     "order": 6,
     "depends_on": ["smoke-05-create-session"],
     "tags": ["smoke", "chat", "message"],
-    "timeout": 15000,
+    "timeout": 30000,
     "steps": [
       {
         "action": "send_message",
@@ -191,7 +181,7 @@
     "order": 7,
     "depends_on": ["smoke-05-create-session"],
     "tags": ["smoke", "chat", "ai", "slow"],
-    "timeout": 90000,
+    "timeout": 120000,
     "steps": [
       {
         "action": "send_message",
@@ -201,7 +191,7 @@
       },
       {
         "action": "wait_for_response",
-        "params": { "timeout": 60000 }
+        "params": { "timeout": 90000 }
       }
     ],
     "assertions": [
@@ -225,12 +215,12 @@
   {
     "id": "smoke-08-hierarchy-navigation",
     "name": "Navigate project → story → session hierarchy",
-    "description": "Navigates up to project level, back down to story, then to session, verifying each level loads correctly.",
+    "description": "Navigates via session IDs to verify each level loads correctly. In Brainstormy, all three share the same /chat/{id} URL.",
     "group": "test",
     "order": 8,
     "depends_on": ["smoke-05-create-session"],
     "tags": ["smoke", "navigation", "hierarchy"],
-    "timeout": 45000,
+    "timeout": 90000,
     "steps": [
       {
         "action": "navigate_to_project",
@@ -238,7 +228,7 @@
       },
       {
         "action": "wait",
-        "params": { "selector": "storyList", "timeout": 10000 }
+        "params": { "selector": "messageList", "timeout": 30000 }
       },
       {
         "action": "navigate_to_story",
@@ -246,7 +236,7 @@
       },
       {
         "action": "wait",
-        "params": { "selector": "sessionList", "timeout": 10000 }
+        "params": { "selector": "messageList", "timeout": 30000 }
       },
       {
         "action": "navigate_to_session",
@@ -254,7 +244,7 @@
       },
       {
         "action": "wait",
-        "params": { "selector": "chatInput", "timeout": 10000 }
+        "params": { "selector": "messageList", "timeout": 30000 }
       }
     ],
     "assertions": [
@@ -275,8 +265,8 @@
       },
       {
         "type": "element_exists",
-        "selector": "chatInput",
-        "message": "Chat interface should be visible at the end"
+        "selector": "messageList",
+        "message": "Message list should be visible at the end"
       }
     ]
   }

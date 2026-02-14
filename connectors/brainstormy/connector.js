@@ -141,6 +141,10 @@ class BrainstormyConnector extends AIAppConnector {
 
     // Verify app ready
     await this.waitForAppReady();
+
+    // Dismiss any engagement/welcome overlays
+    await this.dismissOverlays();
+
     await this.collectEvidence('authenticated_ready');
 
     this._initialized = true;
@@ -369,6 +373,8 @@ class BrainstormyConnector extends AIAppConnector {
     ];
 
     if (!brainstormyActions.includes(action)) {
+      // For generic actions (navigate, click, etc.), dismiss overlays first
+      await this.dismissOverlays();
       return await super.performAction(action, params);
     }
 
@@ -463,44 +469,96 @@ class BrainstormyConnector extends AIAppConnector {
   // ===================================================================
 
   /**
-   * Create a new project.
+   * Create a new project via the sidebar "New Novel" modal.
+   *
+   * Brainstormy's creation flow:
+   * 1. Click "+" button next to Novels in sidebar → opens modal
+   * 2. Fill project name, select medium, click Next
+   * 3. Choose a Navigator genre or click "Skip for now"
+   * 4. Modal closes → app auto-creates project + story + session
+   * 5. URL changes to /chat/{sessionId}
    *
    * @param {string} name - Project name
    * @returns {Promise<{id: string, name: string, timestamp: string}>}
-   * @throws {ConnectorError} If project ID cannot be extracted from URL
+   * @throws {ConnectorError} If project creation fails
    */
   async createProject(name) {
-    // Navigate to projects page
-    await this.navigate('/projects');
+    // Step 0: Dismiss any blocking overlays first
+    await this.dismissOverlays();
 
-    // Click new project button
-    await this.click(this.getSelector('newProjectButton'));
+    // Step 1: Click "New Novel" button in sidebar
+    const newProjectBtn = this.getSelector('newProjectButton');
+    await this.click(newProjectBtn);
 
-    // Fill project name
-    await this.type(this.getSelector('projectNameInput'), name);
+    // Step 2: Wait for creation modal
+    const modalSelector = this.getSelector('createProjectModal');
+    await this.waitFor(modalSelector, 10000);
 
-    // Submit
-    await this.click(this.getSelector('createProjectSubmit'));
+    // Step 3: Fill project name
+    const nameInput = this.getSelector('projectNameInput');
+    await this.type(nameInput, name);
+    await this.page.waitForTimeout(300);
 
-    // Wait for redirect
-    await this.waitForNavigation();
+    // Step 4: Click "Next" (submit step 1)
+    const submitBtn = this.getSelector('createProjectSubmit');
+    await this.click(submitBtn);
+    await this.page.waitForTimeout(2000);
 
-    // Extract project ID from URL
-    const projectId = await this._extractIdFromUrl('project_id');
-    if (!projectId) {
+    // Step 5: Skip navigator selection (step 2 of modal)
+    const skipBtn = this.getSelector('navigatorSkip');
+    try {
+      await this.page.waitForSelector(skipBtn, { timeout: 5000 });
+      await this.click(skipBtn);
+    } catch {
+      // If no skip button, try clicking the General Editorial navigator card
+      const navCard = this.getSelector('navigatorCard');
+      if (navCard) {
+        try {
+          await this.click(navCard);
+        } catch {
+          // Modal may have auto-closed
+        }
+      }
+    }
+
+    // Step 6: Wait for modal to close and session to load
+    await this.page.waitForTimeout(5000);
+
+    // Step 7: Dismiss engagement modal overlay if present
+    await this.dismissOverlays();
+
+    // Step 8: Wait for session bar to appear (indicates session loaded)
+    try {
+      await this.page.waitForSelector('.brainstormy-session-bar', { timeout: 15000 });
+    } catch {
+      // Session bar may not appear immediately
+    }
+    await this.page.waitForTimeout(2000);
+
+    // Step 9: Extract session ID from URL (/chat/{uuid})
+    const currentUrl = await this.getCurrentURL();
+    const uuidMatch = currentUrl.match(/\/chat\/([0-9a-f-]{36})/i);
+    const sessionId = uuidMatch ? uuidMatch[1] : null;
+
+    if (!sessionId) {
       throw new ConnectorError(
-        'Failed to extract project ID from URL after creation',
+        `Failed to extract session ID from URL after project creation: ${currentUrl}`,
         { action: 'create_project', phase: 'interact' }
       );
     }
 
-    // Store in state (both instance property and state map)
-    this.currentProjectId = projectId;
-    this.setState('current_project_id', projectId);
-    this.createdEntities.push({ type: 'project', id: projectId, name });
+    // In Brainstormy, creating a project auto-creates a story and session.
+    // Use the session ID as the entity ID for all three.
+    this.currentProjectId = sessionId;
+    this.currentStoryId = sessionId;
+    this.currentSessionId = sessionId;
+    this.setState('current_project_id', sessionId);
+    this.setState('current_story_id', sessionId);
+    this.setState('current_session_id', sessionId);
+    this.createdEntities.push({ type: 'project', id: sessionId, name });
 
     return {
-      id: projectId,
+      id: sessionId,
       name,
       timestamp: new Date().toISOString()
     };
@@ -509,69 +567,74 @@ class BrainstormyConnector extends AIAppConnector {
   /**
    * Create a new story within the current project.
    *
+   * In Brainstormy, creating a project auto-creates a story and session.
+   * For "Single Story" projects (the default), the story already exists.
+   * This method returns the existing story state if available, or creates
+   * a new project+story if no project exists yet.
+   *
    * @param {string} name - Story name
    * @param {string} vertical - Story vertical (e.g., 'novel', 'screenplay')
    * @returns {Promise<{id: string, name: string, vertical: string, timestamp: string}>}
-   * @throws {ConnectorError} If no current project or story ID cannot be extracted
+   * @throws {ConnectorError} If no current project
    */
   async createStory(name, vertical = 'novel') {
+    // In Brainstormy, story is auto-created with the project.
+    // If we already have a story ID from project creation, return it.
+    const existingStoryId = this.currentStoryId || this.getState('current_story_id');
+    if (existingStoryId) {
+      return {
+        id: existingStoryId,
+        name,
+        vertical,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    // No story exists — create a project which auto-creates story+session
     const projectId = this.currentProjectId || this.getState('current_project_id');
     if (!projectId) {
-      throw new ConnectorError(
-        'No current project — call createProject first',
-        { action: 'create_story', phase: 'interact' }
-      );
+      // Create a project (which creates story+session)
+      const project = await this.createProject(name);
+      return {
+        id: project.id,
+        name,
+        vertical,
+        timestamp: new Date().toISOString()
+      };
     }
 
-    // Click new story button
-    await this.click(this.getSelector('newStoryButton'));
-
-    // Fill story name
-    await this.type(this.getSelector('storyNameInput'), name);
-
-    // Select vertical
-    const verticalSelector = this.getSelector('storyVerticalSelect');
-    if (verticalSelector && await this.exists(verticalSelector)) {
-      await this.select(verticalSelector, vertical);
-    }
-
-    // Submit
-    await this.click(this.getSelector('createStorySubmit'));
-
-    // Wait for redirect
-    await this.waitForNavigation();
-
-    // Extract story ID from URL
-    const storyId = await this._extractIdFromUrl('story_id');
-    if (!storyId) {
-      throw new ConnectorError(
-        'Failed to extract story ID from URL after creation',
-        { action: 'create_story', phase: 'interact' }
-      );
-    }
-
-    // Store in state
-    this.currentStoryId = storyId;
-    this.setState('current_story_id', storyId);
-    this.createdEntities.push({ type: 'story', id: storyId, name });
-
-    return {
-      id: storyId,
-      name,
-      vertical,
-      timestamp: new Date().toISOString()
-    };
+    throw new ConnectorError(
+      'Project exists but no story ID — unexpected state',
+      { action: 'create_story', phase: 'interact' }
+    );
   }
 
   /**
    * Create a new session within the current story.
    *
+   * In Brainstormy, creating a project auto-creates an initial session.
+   * If a session already exists from project creation, return it.
+   * Otherwise, attempt to create a new session within the current story.
+   *
    * @param {string} [type='explore'] - Session type
    * @param {string} [name] - Optional session name
    * @returns {Promise<{id: string, type: string, name: string, timestamp: string}>}
-   * @throws {ConnectorError} If no current story or session ID cannot be extracted
+   * @throws {ConnectorError} If no current story
    */
   async createSession(type = 'explore', name) {
+    // In Brainstormy, session is auto-created with the project.
+    // If we already have a session ID, return it.
+    const existingSessionId = this.currentSessionId || this.getState('current_session_id');
+    if (existingSessionId) {
+      const sessionName = name || `QA Session ${Date.now()}`;
+      return {
+        id: existingSessionId,
+        type,
+        name: sessionName,
+        timestamp: new Date().toISOString()
+      };
+    }
+
     const storyId = this.currentStoryId || this.getState('current_story_id');
     if (!storyId) {
       throw new ConnectorError(
@@ -580,47 +643,26 @@ class BrainstormyConnector extends AIAppConnector {
       );
     }
 
-    // Click new session button
-    await this.click(this.getSelector('newSessionButton'));
-
-    // Select session type if provided and selector exists
-    if (type) {
-      const typeSelector = this.getSelector('sessionTypeSelect');
-      if (typeSelector && await this.exists(typeSelector)) {
-        await this.select(typeSelector, type);
-      }
+    // Try to extract session ID from current URL if we're on a /chat/ page
+    const currentUrl = await this.getCurrentURL();
+    const uuidMatch = currentUrl.match(/\/chat\/([0-9a-f-]{36})/i);
+    if (uuidMatch) {
+      const sessionId = uuidMatch[1];
+      const sessionName = name || `QA Session ${Date.now()}`;
+      this.currentSessionId = sessionId;
+      this.setState('current_session_id', sessionId);
+      return {
+        id: sessionId,
+        type,
+        name: sessionName,
+        timestamp: new Date().toISOString()
+      };
     }
 
-    // Submit (if there's a separate submit button)
-    const submitSelector = this.getSelector('createSessionSubmit');
-    if (submitSelector && await this.exists(submitSelector)) {
-      await this.click(submitSelector);
-    }
-
-    // Wait for redirect
-    await this.waitForNavigation();
-
-    // Extract session ID from URL
-    const sessionId = await this._extractIdFromUrl('session_id');
-    if (!sessionId) {
-      throw new ConnectorError(
-        'Failed to extract session ID from URL after creation',
-        { action: 'create_session', phase: 'interact' }
-      );
-    }
-
-    // Store in state
-    const sessionName = name || `QA Session ${Date.now()}`;
-    this.currentSessionId = sessionId;
-    this.setState('current_session_id', sessionId);
-    this.createdEntities.push({ type: 'session', id: sessionId, name: sessionName });
-
-    return {
-      id: sessionId,
-      type,
-      name: sessionName,
-      timestamp: new Date().toISOString()
-    };
+    throw new ConnectorError(
+      'No session available — create a project first',
+      { action: 'create_session', phase: 'interact' }
+    );
   }
 
   /**
@@ -653,11 +695,22 @@ class BrainstormyConnector extends AIAppConnector {
 
   /**
    * Navigate to a specific project by ID.
-   * @param {string} projectId - Project UUID
+   *
+   * Uses the session URL format (/chat/{id}) since Brainstormy doesn't have
+   * a /projects/ route. Falls back to clicking the sidebar item.
+   *
+   * @param {string} projectId - Project UUID (same as session ID in Brainstormy)
    * @returns {Promise<{navigated: boolean, projectId: string}>}
    */
   async navigateToProject(projectId) {
-    await this.navigate(`/projects/${projectId}`);
+    // In Brainstormy, project/story/session IDs are the same.
+    // Navigate to the chat session URL.
+    const baseUrl = this.getBaseURL().replace(/\/$/, '');
+    await this.page.goto(`${baseUrl}/chat/${projectId}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: this.getTimeout('navigation')
+    });
+    await this.dismissOverlays();
     await this.waitForAppReady();
     this.currentProjectId = projectId;
     this.setState('current_project_id', projectId);
@@ -666,26 +719,33 @@ class BrainstormyConnector extends AIAppConnector {
 
   /**
    * Navigate to a specific story by name or ID.
+   *
+   * In Brainstormy, stories and sessions share the same /chat/{id} URL.
+   *
    * @param {string} storyIdentifier - Story name, UUID, or storyId
    */
   async navigateToStory(storyIdentifier) {
-    // If it looks like a UUID, navigate directly
-    if (/^[a-f0-9-]{36}$/.test(storyIdentifier)) {
-      await this.navigate(`/stories/${storyIdentifier}`);
+    // If it looks like a UUID, navigate via chat URL
+    if (/^[a-f0-9-]{36}$/i.test(storyIdentifier)) {
+      const baseUrl = this.getBaseURL().replace(/\/$/, '');
+      await this.page.goto(`${baseUrl}/chat/${storyIdentifier}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.getTimeout('navigation')
+      });
+      await this.dismissOverlays();
       this.currentStoryId = storyIdentifier;
       this.setState('current_story_id', storyIdentifier);
-      return;
+      return { navigated: true, storyId: storyIdentifier };
     }
 
     // Otherwise, search sidebar items
     const storyItems = await this.page.$$(this.getSelector('storySidebarItem'));
     for (const item of storyItems) {
       const text = await item.textContent();
-      const href = await item.getAttribute('href');
-      if (text.includes(storyIdentifier) || (href && href.includes(storyIdentifier))) {
+      if (text.includes(storyIdentifier)) {
         await item.click();
-        await this.waitForNavigation();
-        return;
+        await this.page.waitForTimeout(3000);
+        return { navigated: true, storyId: storyIdentifier };
       }
     }
     throw new ConnectorError(
@@ -696,26 +756,34 @@ class BrainstormyConnector extends AIAppConnector {
 
   /**
    * Navigate to a specific session by name or ID.
+   *
+   * In Brainstormy, sessions use /chat/{id} URLs.
+   *
    * @param {string} sessionIdentifier - Session name or UUID
    */
   async navigateToSession(sessionIdentifier) {
     // Direct navigation for UUIDs
     if (sessionIdentifier && /^[0-9a-f-]{36}$/i.test(sessionIdentifier)) {
-      await this.navigate(`/sessions/${sessionIdentifier}`);
+      const baseUrl = this.getBaseURL().replace(/\/$/, '');
+      await this.page.goto(`${baseUrl}/chat/${sessionIdentifier}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.getTimeout('navigation')
+      });
+      await this.dismissOverlays();
       await this.waitForAppReady();
       this.currentSessionId = sessionIdentifier;
       this.setState('current_session_id', sessionIdentifier);
       return { navigated: true, sessionId: sessionIdentifier };
     }
 
+    // Search sidebar items
     const sessionItems = await this.page.$$(this.getSelector('sessionItem'));
     for (const item of sessionItems) {
       const text = await item.textContent();
-      const href = await item.getAttribute('href');
-      if (text.includes(sessionIdentifier) || (href && href.includes(sessionIdentifier))) {
+      if (text.includes(sessionIdentifier)) {
         await item.click();
-        await this.waitForNavigation();
-        return;
+        await this.page.waitForTimeout(3000);
+        return { navigated: true, sessionId: sessionIdentifier };
       }
     }
     throw new ConnectorError(
@@ -1032,22 +1100,22 @@ class BrainstormyConnector extends AIAppConnector {
    * @returns {Promise<{project_id: string, created: boolean}>}
    */
   async setupTestProject(name = 'QA Test Project') {
-    await this.navigate('/projects');
-    await this.waitFor(this.getSelector('sidebarProjects'));
+    // Check sidebar for existing project by name
+    const sidebarItems = await this.page.$$(this.getSelector('storySidebarItem') || '.sidebar-item');
+    for (const item of sidebarItems) {
+      const text = await item.textContent();
+      if (text.trim().includes(name)) {
+        await item.click();
+        await this.page.waitForTimeout(3000);
 
-    // Check if test project already exists
-    const projectLinks = await this.page.$$('a[href*="/projects/"]');
-    for (const link of projectLinks) {
-      const text = await link.textContent();
-      if (text.trim() === name) {
-        await link.click();
-        await this.waitForNavigation();
-
-        const projectId = await this._extractIdFromUrl('project_id');
-        this.currentProjectId = projectId;
-        this.setState('current_project_id', projectId);
-
-        return { project_id: projectId, created: false };
+        const currentUrl = await this.getCurrentURL();
+        const uuidMatch = currentUrl.match(/\/chat\/([0-9a-f-]{36})/i);
+        const projectId = uuidMatch ? uuidMatch[1] : null;
+        if (projectId) {
+          this.currentProjectId = projectId;
+          this.setState('current_project_id', projectId);
+          return { project_id: projectId, created: false };
+        }
       }
     }
 
@@ -1119,6 +1187,27 @@ class BrainstormyConnector extends AIAppConnector {
     } catch (error) {
       // Citations are supplementary — don't fail the test
       return [];
+    }
+  }
+
+  // ===================================================================
+  // OVERLAY DISMISSAL
+  // ===================================================================
+
+  /**
+   * Dismiss engagement modals, welcome overlays, and other blocking dialogs.
+   * Uses JavaScript removal to avoid Playwright click interception issues.
+   */
+  async dismissOverlays() {
+    try {
+      await this.page.evaluate(() => {
+        document.querySelectorAll(
+          '[class*="engagement-modal"], [class*="overlay"][role="dialog"], [class*="welcome-modal"]'
+        ).forEach(el => el.remove());
+      });
+      await this.page.waitForTimeout(500);
+    } catch {
+      // Page may be navigating or closed
     }
   }
 

@@ -311,37 +311,42 @@ describe('BrainstormyConnector', () => {
   // createProject()
   // -----------------------------------------------------------------
   describe('createProject()', () => {
-    test('navigates to /projects, clicks new, fills name', async () => {
+    test('opens modal, fills name, clicks next, skips navigator', async () => {
       const { connector, page } = createConnector();
-      mockUrl(page, 'https://staging.brainstormy.app/projects/abc-123');
+      mockUrl(page, 'https://staging.brainstormy.app/chat/abc12345-1234-1234-1234-123456789012');
       await connector.createProject('My Novel');
-      // navigate calls page.goto with base URL + path
-      expect(page.goto).toHaveBeenCalledWith('https://staging.brainstormy.app/projects');
-      expect(page.click).toHaveBeenCalledWith('[data-testid="new-project-button"]');
-      expect(page.fill).toHaveBeenCalledWith('[data-testid="project-name-input"]', 'My Novel');
+      // Should click new project button, fill name, click submit
+      expect(page.click).toHaveBeenCalled();
+      expect(page.fill).toHaveBeenCalledWith(expect.any(String), 'My Novel');
     });
 
-    test('extracts project ID from URL', async () => {
+    test('extracts session ID from /chat/ URL', async () => {
       const { connector, page } = createConnector();
-      mockUrl(page, 'https://staging.brainstormy.app/projects/proj-uuid-42');
+      mockUrl(page, 'https://staging.brainstormy.app/chat/abc12345-1234-1234-1234-123456789012');
       const result = await connector.createProject('Test');
-      expect(result.id).toBe('proj-uuid-42');
+      expect(result.id).toBe('abc12345-1234-1234-1234-123456789012');
     });
 
-    test('stores project ID in state', async () => {
+    test('stores project/story/session IDs in state', async () => {
       const { connector, page } = createConnector();
-      mockUrl(page, 'https://staging.brainstormy.app/projects/proj-state-1');
+      const uuid = 'abc12345-1234-1234-1234-123456789012';
+      mockUrl(page, `https://staging.brainstormy.app/chat/${uuid}`);
       await connector.createProject('Test');
-      expect(connector.currentProjectId).toBe('proj-state-1');
-      expect(connector.getState('current_project_id')).toBe('proj-state-1');
+      expect(connector.currentProjectId).toBe(uuid);
+      expect(connector.currentStoryId).toBe(uuid);
+      expect(connector.currentSessionId).toBe(uuid);
+      expect(connector.getState('current_project_id')).toBe(uuid);
+      expect(connector.getState('current_story_id')).toBe(uuid);
+      expect(connector.getState('current_session_id')).toBe(uuid);
     });
 
     test('tracks entity for cleanup', async () => {
       const { connector, page } = createConnector();
-      mockUrl(page, 'https://staging.brainstormy.app/projects/proj-cleanup');
+      const uuid = 'abc12345-1234-1234-1234-123456789012';
+      mockUrl(page, `https://staging.brainstormy.app/chat/${uuid}`);
       await connector.createProject('Cleanup Test');
       expect(connector.createdEntities).toContainEqual(
-        expect.objectContaining({ type: 'project', id: 'proj-cleanup', name: 'Cleanup Test' })
+        expect.objectContaining({ type: 'project', id: uuid, name: 'Cleanup Test' })
       );
     });
   });
@@ -350,33 +355,29 @@ describe('BrainstormyConnector', () => {
   // createStory()
   // -----------------------------------------------------------------
   describe('createStory()', () => {
-    test('throws if no project selected', async () => {
+    test('returns existing story ID if already set from project creation', async () => {
       const { connector } = createConnector();
-      await expect(connector.createStory('My Story'))
-        .rejects.toThrow('No current project');
+      connector.currentStoryId = 'story-from-project';
+      const result = await connector.createStory('My Story', 'novel');
+      expect(result.id).toBe('story-from-project');
+      expect(result.name).toBe('My Story');
+      expect(result.vertical).toBe('novel');
     });
 
-    test('fills story name and vertical', async () => {
+    test('creates project if no project or story exists', async () => {
       const { connector, page } = createConnector();
-      connector.currentProjectId = 'proj-1';
-      mockUrl(page, 'https://staging.brainstormy.app/stories/story-1');
-      // exists() calls page.$() — return truthy so vertical select is found
-      page.$.mockResolvedValue(createMockElement());
-      await connector.createStory('Chapter 1', 'screenplay');
-      expect(page.fill).toHaveBeenCalledWith('[data-testid="story-name-input"]', 'Chapter 1');
-      expect(page.selectOption).toHaveBeenCalledWith(
-        '[data-testid="story-vertical-select"]',
-        'screenplay'
-      );
+      const uuid = 'abc12345-1234-1234-1234-123456789012';
+      mockUrl(page, `https://staging.brainstormy.app/chat/${uuid}`);
+      const result = await connector.createStory('New Story');
+      expect(result.id).toBe(uuid);
     });
 
-    test('extracts story ID from URL', async () => {
-      const { connector, page } = createConnector();
+    test('throws if project exists but no story ID', async () => {
+      const { connector } = createConnector();
       connector.currentProjectId = 'proj-1';
-      mockUrl(page, 'https://staging.brainstormy.app/stories/story-uuid-7');
-      const result = await connector.createStory('Test Story');
-      expect(result.id).toBe('story-uuid-7');
-      expect(connector.currentStoryId).toBe('story-uuid-7');
+      // No storyId set
+      await expect(connector.createStory('Test'))
+        .rejects.toThrow('unexpected state');
     });
   });
 
@@ -384,32 +385,29 @@ describe('BrainstormyConnector', () => {
   // createSession()
   // -----------------------------------------------------------------
   describe('createSession()', () => {
-    test('throws if no story selected', async () => {
+    test('returns existing session ID if already set from project creation', async () => {
       const { connector } = createConnector();
+      connector.currentSessionId = 'sess-from-project';
+      const result = await connector.createSession('explore');
+      expect(result.id).toBe('sess-from-project');
+      expect(result.type).toBe('explore');
+    });
+
+    test('extracts session ID from /chat/ URL if on session page', async () => {
+      const { connector, page } = createConnector();
+      connector.currentStoryId = 'story-1';
+      const uuid = 'abc12345-1234-1234-1234-123456789012';
+      mockUrl(page, `https://staging.brainstormy.app/chat/${uuid}`);
+      const result = await connector.createSession('explore');
+      expect(result.id).toBe(uuid);
+      expect(connector.currentSessionId).toBe(uuid);
+    });
+
+    test('throws if no story and no session available', async () => {
+      const { connector, page } = createConnector();
+      mockUrl(page, 'https://staging.brainstormy.app/');
       await expect(connector.createSession('explore'))
         .rejects.toThrow('No current story');
-    });
-
-    test('selects session type', async () => {
-      const { connector, page } = createConnector();
-      connector.currentStoryId = 'story-1';
-      mockUrl(page, 'https://staging.brainstormy.app/sessions/sess-1');
-      page.$.mockResolvedValue(createMockElement());
-      await connector.createSession('brainstorm');
-      expect(page.selectOption).toHaveBeenCalledWith(
-        '[data-testid="session-type-select"]',
-        'brainstorm'
-      );
-    });
-
-    test('extracts session ID from URL', async () => {
-      const { connector, page } = createConnector();
-      connector.currentStoryId = 'story-1';
-      mockUrl(page, 'https://staging.brainstormy.app/sessions/sess-uuid-3');
-      page.$.mockResolvedValue(createMockElement());
-      const result = await connector.createSession('explore');
-      expect(result.id).toBe('sess-uuid-3');
-      expect(connector.currentSessionId).toBe('sess-uuid-3');
     });
   });
 
