@@ -42,18 +42,28 @@ module.exports = function testCommand(program) {
         // Print summary
         console.log('--- Test Run Complete ---');
         console.log(`  Run ID:  ${result.runId || 'N/A'}`);
-        console.log(`  Status:  ${result.status || 'completed'}`);
-        console.log(`  Total:   ${result.total || 0}`);
-        console.log(`  Passed:  ${result.passed || 0}`);
-        console.log(`  Failed:  ${result.failed || 0}`);
-        console.log(`  Skipped: ${result.skipped || 0}`);
+        console.log(`  Status:  ${result.overallStatus || 'completed'}`);
+        if (result.connectorError) {
+          console.log(`  Error:   [${result.connectorError.phase}] ${result.connectorError.message}`);
+        }
+        // Print agent errors if any
+        for (const ar of (result.agentResults || [])) {
+          if (ar.error) {
+            console.log(`  Agent ${ar.agentId} error: ${ar.error.message}`);
+          }
+        }
+        const s = result.summary || {};
+        console.log(`  Total:   ${s.totalScenarios || 0}`);
+        console.log(`  Passed:  ${s.passedScenarios || 0}`);
+        console.log(`  Failed:  ${s.failedScenarios || 0}`);
+        console.log(`  Skipped: ${s.skippedScenarios || 0}`);
 
         if (result.bugs && result.bugs.length > 0) {
           console.log(`  Bugs:    ${result.bugs.length} created`);
         }
 
         // Exit with non-zero if failures
-        const exitCode = (result.failed || 0) > 0 ? 1 : 0;
+        const exitCode = (s.failedScenarios || 0) > 0 ? 1 : 0;
         await engine.shutdown();
         process.exit(exitCode);
 

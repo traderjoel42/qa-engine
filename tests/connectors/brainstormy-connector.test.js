@@ -79,13 +79,13 @@ describe('BrainstormyConnector', () => {
   // initialize()
   // -----------------------------------------------------------------
   describe('initialize()', () => {
-    test('navigates to staging URL', async () => {
+    test('navigates to base URL after auth', async () => {
       const { connector, page } = createConnector();
       jest.spyOn(connector, 'authenticate').mockResolvedValue(true);
       await connector.initialize();
       expect(page.goto).toHaveBeenCalledWith(
         'https://staging.brainstormy.app',
-        { waitUntil: 'networkidle' }
+        { waitUntil: 'domcontentloaded', timeout: 120000 }
       );
     });
 
@@ -108,8 +108,8 @@ describe('BrainstormyConnector', () => {
       jest.spyOn(connector, 'authenticate').mockResolvedValue(true);
       await connector.initialize();
       // collectAll is called as (page, stepName) — step name at index 1
+      // initial_load is collected inside authenticate() which is mocked here
       const stepNames = evidence.collectAll.mock.calls.map(c => c[1]);
-      expect(stepNames).toContain('initial_load');
       expect(stepNames).toContain('authenticated_ready');
     });
 
@@ -119,7 +119,7 @@ describe('BrainstormyConnector', () => {
       await connector.initialize();
       // waitForAppReady → waitFor → page.waitForSelector
       expect(page.waitForSelector).toHaveBeenCalledWith(
-        '[data-testid="app-loaded"]',
+        '#root',
         expect.objectContaining({ timeout: expect.any(Number) })
       );
     });
@@ -130,51 +130,110 @@ describe('BrainstormyConnector', () => {
   // -----------------------------------------------------------------
   describe('authenticate()', () => {
     beforeEach(() => {
-      process.env.BRAINSTORMY_TEST_PASSWORD = 'test-secret-pw';
+      process.env.CLERK_SECRET_KEY = 'sk_test_fake_key';
     });
 
     afterEach(() => {
-      delete process.env.BRAINSTORMY_TEST_PASSWORD;
+      delete process.env.CLERK_SECRET_KEY;
     });
 
-    test('fills Clerk email input with configured email', async () => {
-      const { connector, page } = createConnector();
+    test('throws if CLERK_SECRET_KEY is missing', async () => {
+      delete process.env.CLERK_SECRET_KEY;
+      const { connector } = createConnector();
+      const result = await connector.authenticate();
+      expect(result).toBe(false);
+    });
+
+    test('calls Clerk API to look up user by email', async () => {
+      const { connector } = createConnector();
+      const apiSpy = jest.spyOn(connector, '_clerkApiRequest')
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify([{ id: 'user_test123' }])
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify({ url: 'https://accounts.clerk.dev/sign-in/ticket?token=abc' })
+        });
+
       await connector.authenticate();
-      expect(page.fill).toHaveBeenCalledWith(
-        'input[name="identifier"]',
-        'testbot@brainstormy.app'
+
+      expect(apiSpy.mock.calls[0][0]).toBe('GET');
+      expect(apiSpy.mock.calls[0][1]).toContain('/v1/users');
+      expect(apiSpy.mock.calls[0][1]).toContain('testbot%40brainstormy.app');
+    });
+
+    test('creates sign-in token with user ID', async () => {
+      const { connector } = createConnector();
+      const apiSpy = jest.spyOn(connector, '_clerkApiRequest')
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify([{ id: 'user_test123' }])
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify({ url: 'https://accounts.clerk.dev/sign-in/ticket?token=abc' })
+        });
+
+      await connector.authenticate();
+
+      expect(apiSpy.mock.calls[1][0]).toBe('POST');
+      expect(apiSpy.mock.calls[1][1]).toBe('/v1/sign_in_tokens');
+      const tokenBody = JSON.parse(apiSpy.mock.calls[1][2]);
+      expect(tokenBody.user_id).toBe('user_test123');
+      expect(tokenBody.redirect_url).toBeDefined();
+    });
+
+    test('navigates to sign-in token URL', async () => {
+      const { connector, page } = createConnector();
+      jest.spyOn(connector, '_clerkApiRequest')
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify([{ id: 'user_test123' }])
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify({ url: 'https://accounts.clerk.dev/sign-in/ticket?token=abc' })
+        });
+
+      await connector.authenticate();
+
+      expect(page.goto).toHaveBeenCalledWith(
+        'https://accounts.clerk.dev/sign-in/ticket?token=abc',
+        expect.objectContaining({ waitUntil: 'domcontentloaded' })
       );
     });
 
-    test('fills Clerk password input from env var', async () => {
-      const { connector, page } = createConnector();
-      await connector.authenticate();
-      expect(page.fill).toHaveBeenCalledWith(
-        'input[name="password"]',
-        'test-secret-pw'
-      );
+    test('returns true on successful auth', async () => {
+      const { connector } = createConnector();
+      jest.spyOn(connector, '_clerkApiRequest')
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify([{ id: 'user_test123' }])
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          body: JSON.stringify({ url: 'https://accounts.clerk.dev/sign-in/ticket?token=abc' })
+        });
+
+      const result = await connector.authenticate();
+      expect(result).toBe(true);
     });
 
-    test('clicks submit and waits for user menu', async () => {
-      const { connector, page } = createConnector();
-      await connector.authenticate();
-      expect(page.click).toHaveBeenCalledWith('button[type="submit"]');
-      expect(page.waitForSelector).toHaveBeenCalledWith(
-        '[data-testid="user-menu"]',
-        expect.objectContaining({ timeout: expect.any(Number) })
-      );
-    });
+    test('returns false when Clerk API fails', async () => {
+      const { connector } = createConnector();
+      jest.spyOn(connector, '_clerkApiRequest')
+        .mockResolvedValueOnce({ ok: false, status: 401, body: 'Unauthorized' });
 
-    test('returns false on timeout', async () => {
-      const { connector, page } = createConnector();
-      page.waitForSelector.mockRejectedValueOnce(new Error('Timeout'));
       const result = await connector.authenticate();
       expect(result).toBe(false);
     });
 
     test('collects evidence on failure', async () => {
-      const { connector, page, evidence } = createConnector();
-      page.waitForSelector.mockRejectedValueOnce(new Error('Timeout'));
+      const { connector, evidence } = createConnector();
+      jest.spyOn(connector, '_clerkApiRequest')
+        .mockResolvedValueOnce({ ok: false, status: 401, body: 'Unauthorized' });
+
       await connector.authenticate();
       const stepNames = evidence.collectAll.mock.calls.map(c => c[1]);
       expect(stepNames).toContain('auth_failed');

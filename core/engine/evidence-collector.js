@@ -315,22 +315,17 @@ class EvidenceCollector {
    * @param {import('playwright').Request} request
    */
   _onRequestFinished(request) {
-    try {
-      const response = request.response();
+    // request.response() returns Promise<Response|null> in Playwright ≥1.38
+    const promise = Promise.resolve(request.response())
+      .then(response => this._captureRequest(request, response))
+      .catch(err => {
+        console.error('[EvidenceCollector] Request capture error:', err.message);
+      });
 
-      // Track the async capture promise so cleanup can await it
-      const promise = this._captureRequest(request, response);
-      this._pendingCaptures.push(promise);
-      promise
-        .catch(err => {
-          console.error('[EvidenceCollector] Request capture error:', err.message);
-        })
-        .finally(() => {
-          this._pendingCaptures = this._pendingCaptures.filter(p => p !== promise);
-        });
-    } catch (error) {
-      console.error('[EvidenceCollector] Request finished handler error:', error.message);
-    }
+    this._pendingCaptures.push(promise);
+    promise.finally(() => {
+      this._pendingCaptures = this._pendingCaptures.filter(p => p !== promise);
+    });
   }
 
   /**
@@ -365,7 +360,9 @@ class EvidenceCollector {
    * @param {import('playwright').Response|null} response - Response object (synchronous in Playwright v1.58)
    */
   async _captureRequest(request, response) {
-    const status = response ? response.status() : null;
+    const status = response
+      ? (typeof response.status === 'function' ? response.status() : response.status)
+      : null;
 
     // Calculate duration from timing data
     // request.timing() returns timestamps, not durations.
@@ -376,18 +373,33 @@ class EvidenceCollector {
       duration = Math.round(timing.responseEnd - timing.startTime);
     }
 
+    const statusText = response
+      ? (typeof response.statusText === 'function' ? response.statusText() : response.statusText)
+      : null;
+
+    let responseHeaders = {};
+    if (response) {
+      try {
+        responseHeaders = this._redactHeaders(
+          typeof response.allHeaders === 'function' ? await response.allHeaders() : {}
+        );
+      } catch {
+        // Headers may not be available for some responses
+      }
+    }
+
     const entry = {
       url: request.url(),
       method: request.method(),
       status,
-      statusText: response ? response.statusText() : null,
+      statusText,
       duration,
       resourceType: request.resourceType(),
       failed: status !== null && status >= 400,
       failureReason: null,
       timestamp: new Date().toISOString(),
       requestHeaders: this._redactHeaders(request.headers()),
-      responseHeaders: response ? this._redactHeaders(await response.allHeaders()) : {}
+      responseHeaders
     };
 
     this._networkRequests.push(entry);

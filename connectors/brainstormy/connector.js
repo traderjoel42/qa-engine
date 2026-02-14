@@ -113,8 +113,8 @@ class BrainstormyConnector extends AIAppConnector {
   }
 
   /**
-   * Initialize: warm up service, navigate to staging URL, authenticate via Clerk,
-   * verify dashboard loads.
+   * Initialize: warm up service, authenticate via Clerk Backend API,
+   * navigate to app, verify dashboard loads.
    */
   async initialize() {
     const env = this.getEnvironment();
@@ -122,11 +122,7 @@ class BrainstormyConnector extends AIAppConnector {
     // Wake up Render service before browser navigation
     await this.warmUp();
 
-    // Navigate to app
-    await this.page.goto(env.baseUrl, { waitUntil: 'networkidle' });
-    await this.collectEvidence('initial_load');
-
-    // Authenticate
+    // Authenticate via Clerk Backend API (session injection)
     if (env.auth.required) {
       const success = await this.authenticate();
       if (!success) {
@@ -137,42 +133,144 @@ class BrainstormyConnector extends AIAppConnector {
       }
     }
 
+    // Navigate to app (session cookie already set)
+    await this.page.goto(env.baseUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: this.getTimeout('warmUp') || 120000
+    });
+
     // Verify app ready
     await this.waitForAppReady();
     await this.collectEvidence('authenticated_ready');
+
+    this._initialized = true;
   }
 
   /**
-   * Authenticate via Clerk's email/password sign-in form.
+   * Authenticate via Clerk Backend API session injection.
+   *
+   * Instead of filling the Clerk UI form (which triggers factor-two verification
+   * on every Playwright run due to fresh browser contexts), this method:
+   *   1. Looks up the test user by email via Clerk Backend API
+   *   2. Creates a sign-in token for that user
+   *   3. Navigates the browser to the sign-in token URL, which creates a
+   *      session and redirects to the app — bypassing factor-two entirely
+   *
+   * Requires CLERK_SECRET_KEY environment variable (sk_test_... or sk_live_...).
+   *
    * @returns {Promise<boolean>} Success
    */
   async authenticate() {
     const env = this.getEnvironment();
     const auth = env.auth;
-    const timeout = this.getTimeout('clerkAuth');
+    const clerkSecretKey = process.env.CLERK_SECRET_KEY;
 
     try {
-      const emailSelector = this.getSelector('clerkEmailInput');
-      const passwordSelector = this.getSelector('clerkPasswordInput');
-      const submitSelector = this.getSelector('clerkSubmitButton');
+      if (!clerkSecretKey) {
+        throw new Error('CLERK_SECRET_KEY environment variable is required for Clerk Backend API authentication');
+      }
+      const email = auth.credentials.email;
 
-      await this.page.waitForSelector(emailSelector, { timeout });
-
-      // Fill credentials
-      await this.page.fill(emailSelector, auth.credentials.email);
-      await this.page.fill(
-        passwordSelector,
-        process.env[auth.credentials.passwordEnv]
+      // Step 1: Look up user by email
+      console.log(`  Looking up Clerk user: ${email}...`);
+      const usersResponse = await this._clerkApiRequest(
+        'GET',
+        `/v1/users?email_address[]=${encodeURIComponent(email)}`,
+        null,
+        clerkSecretKey
       );
 
-      // Submit
-      await this.page.click(submitSelector);
+      if (!usersResponse.ok) {
+        throw new Error(`Clerk user lookup failed: HTTP ${usersResponse.status} — ${usersResponse.body}`);
+      }
 
-      // Wait for redirect to dashboard
-      await this.page.waitForSelector(
-        this.getSelector('userMenu'),
-        { timeout }
+      const users = JSON.parse(usersResponse.body);
+      if (!Array.isArray(users) || users.length === 0) {
+        throw new Error(`No Clerk user found for email: ${email}`);
+      }
+
+      const userId = users[0].id;
+      console.log(`  Found user: ${userId}`);
+
+      // Step 2: Create a sign-in token for the user
+      // redirect_url tells Clerk where to send the browser after consuming the token,
+      // which ensures the session is established on the app's domain.
+      console.log('  Creating sign-in token...');
+      const tokenResponse = await this._clerkApiRequest(
+        'POST',
+        '/v1/sign_in_tokens',
+        JSON.stringify({ user_id: userId, redirect_url: env.baseUrl }),
+        clerkSecretKey
       );
+
+      if (!tokenResponse.ok) {
+        throw new Error(`Clerk sign-in token creation failed: HTTP ${tokenResponse.status} — ${tokenResponse.body}`);
+      }
+
+      const tokenData = JSON.parse(tokenResponse.body);
+      const signInUrl = tokenData.url;
+
+      if (!signInUrl) {
+        throw new Error('Clerk sign-in token response missing url field');
+      }
+
+      // Step 3: Navigate to app's sign-in with the ticket hash fragment.
+      // This triggers the Clerk middleware to redirect to accounts.dev, which
+      // initializes the Clerk client (sets __clerk_db_jwt). This client state
+      // is required for the sign-in token URL to properly redirect back.
+      const baseUrl = env.baseUrl.replace(/\/$/, '');
+      const appTicketUrl = `${baseUrl}/sign-in#/__clerk_ticket=${tokenData.token}`;
+      console.log('  Initializing Clerk client via app redirect...');
+      await this.page.goto(appTicketUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.getTimeout('navigation') || 90000
+      });
+      await this.page.waitForTimeout(5000);
+
+      // Step 4: Navigate to sign-in token URL on accounts.dev
+      // With the Clerk client established, the ticket is consumed and Clerk
+      // redirects back to the app with a valid session.
+      console.log('  Navigating to sign-in token URL...');
+      await this.page.goto(signInUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.getTimeout('navigation') || 90000
+      });
+      await this.collectEvidence('initial_load');
+
+      // Step 5: Wait for redirect to app
+      if (!this.page.url().startsWith(baseUrl)) {
+        try {
+          await this.page.waitForURL(url => url.href.startsWith(baseUrl), { timeout: 30000 });
+        } catch {
+          // If redirect didn't work, navigate directly (session may have been
+          // established via handshake)
+          console.log('  Redirect did not complete, navigating to app...');
+          await this.page.goto(baseUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: this.getTimeout('navigation') || 90000
+          });
+        }
+      }
+      console.log(`  Current URL: ${this.page.url()}`);
+
+      // Step 6: Verify authenticated state
+      console.log('  Verifying authenticated state...');
+      const userMenuSelector = this.getSelector('userMenu');
+      if (userMenuSelector) {
+        try {
+          await this.page.waitForSelector(userMenuSelector, {
+            timeout: this.getTimeout('clerkAuth') || 30000
+          });
+          console.log('  Authenticated (user menu visible)');
+        } catch {
+          // Fallback: check we're not on sign-in page
+          const currentUrl = this.page.url();
+          if (currentUrl.includes('sign-in') || currentUrl.includes('factor')) {
+            throw new Error(`Still on sign-in page after session injection: ${currentUrl}`);
+          }
+          console.log('  Authenticated (no longer on sign-in page)');
+        }
+      }
 
       await this.collectEvidence('auth_complete');
       return true;
@@ -181,6 +279,50 @@ class BrainstormyConnector extends AIAppConnector {
       console.error('Clerk authentication failed:', error.message);
       return false;
     }
+  }
+
+  /**
+   * Make an HTTP request to the Clerk Backend API.
+   * @param {string} method - HTTP method
+   * @param {string} path - API path (e.g., '/v1/users')
+   * @param {string|null} body - Request body (JSON string)
+   * @param {string} secretKey - Clerk secret key
+   * @returns {Promise<{ok: boolean, status: number, body: string}>}
+   */
+  _clerkApiRequest(method, path, body, secretKey) {
+    const https = require('https');
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'api.clerk.com',
+        path,
+        method,
+        headers: {
+          'Authorization': `Bearer ${secretKey}`,
+          'Content-Type': 'application/json'
+        }
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => { data += chunk; });
+        res.on('end', () => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            body: data
+          });
+        });
+      });
+
+      req.on('error', reject);
+      req.setTimeout(15000, () => {
+        req.destroy();
+        reject(new Error('Clerk API request timed out'));
+      });
+
+      if (body) req.write(body);
+      req.end();
+    });
   }
 
   /**

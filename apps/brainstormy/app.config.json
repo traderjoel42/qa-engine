@@ -16,10 +16,10 @@
         }
       },
       "selectors": {
-        "clerkEmailInput": "[name='emailAddress'], [name='email'], input[type='email']",
-        "clerkPasswordInput": "[name='password'], input[type='password']",
-        "clerkSubmitButton": "[type='submit'], button:has-text('Continue'), button:has-text('Sign in')",
-        "userMenu": "[data-testid='user-menu'], [data-testid='user-button']",
+        "clerkEmailInput": "input[name='identifier'], #identifier-field",
+        "clerkPasswordInput": "input[name='password'], #password-field",
+        "clerkSubmitButton": ".cl-formButtonPrimary, button:has-text('Continue')",
+        "userMenu": ".cl-userButtonTrigger, [data-testid='user-menu'], [data-testid='user-button']",
         "logoutButton": "[data-testid='logout-button'], button:has-text('Sign out')",
         "sidebarProjects": "[data-testid='sidebar-projects'], a[href='/projects']",
         "storySidebarItem": "[data-testid='story-nav-item'], .sidebar-story-link",
@@ -61,7 +61,7 @@
         "bookmarksTab": "[data-testid='bookmarks-tab'], a[href*='bookmarks']",
         "bookmarkItem": "[data-testid='bookmark-item'], .bookmark-list-item",
         "sessionSummaryContent": "[data-testid='session-summary'], .session-summary-content",
-        "readyIndicator": "[data-testid='app-loaded'], #app-root"
+        "readyIndicator": "#root"
       },
       "timeouts": {
         "navigation": 90000,

@@ -12,11 +12,13 @@ function createMockEngine(overrides = {}) {
   return {
     run: jest.fn().mockResolvedValue({
       runId: 'run-001',
-      status: 'completed',
-      total: 5,
-      passed: 4,
-      failed: 1,
-      skipped: 0,
+      overallStatus: 'failed',
+      summary: {
+        totalScenarios: 5,
+        passedScenarios: 4,
+        failedScenarios: 1,
+        skippedScenarios: 0
+      },
       agentResults: []
     }),
     status: jest.fn().mockResolvedValue([]),
@@ -111,11 +113,13 @@ describe('test command', () => {
   test('exits with code 0 when no failures', async () => {
     mockEngine.run.mockResolvedValue({
       runId: 'run-002',
-      status: 'completed',
-      total: 3,
-      passed: 3,
-      failed: 0,
-      skipped: 0
+      overallStatus: 'passed',
+      summary: {
+        totalScenarios: 3,
+        passedScenarios: 3,
+        failedScenarios: 0,
+        skippedScenarios: 0
+      }
     });
 
     await runCommand(['--app', 'brainstormy']);

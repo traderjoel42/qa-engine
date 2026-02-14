@@ -1,8 +1,8 @@
 # QA Engine — Mac Mini First Run: Implementation Log
 
-**Date:** 2026-02-13
+**Date:** 2026-02-13 (started) → 2026-02-14 (first run completed)
 **Spec version:** v3.2 (`docs/qa-engine-mac-mini-first-run-spec.md`)
-**Test suite:** 1840 tests, 43 suites — all passing after every change
+**Test suite:** 1842 tests, 43 suites — all passing after every change
 
 ---
 
@@ -34,19 +34,57 @@ Added `data/*.db`, `data/*.db-journal`, `data/*.db-wal` to prevent committing SQ
 - Threaded `skipBugDetection` through `orchestrator._runPostHooks(result, options)`
 - Guarded `failureHandler.handle()` with `!options.skipBugDetection`
 
+### Clerk Backend API Session Injection (new)
+**Files:** `connectors/brainstormy/connector.js`, `scripts/verify-auth.js`, `apps/brainstormy/app.config.json`
+
+Replaced UI-based Clerk login with Backend API session injection to bypass factor-two
+verification that triggers on every fresh Playwright browser context.
+
+**Auth flow:**
+1. Look up test user by email via `GET /v1/users?email_address[]=...`
+2. Create sign-in token via `POST /v1/sign_in_tokens` with `redirect_url`
+3. Navigate to app's sign-in page with `#/__clerk_ticket=TOKEN` to establish Clerk client on accounts.dev
+4. Navigate to sign-in token URL — Clerk processes ticket and redirects to app with valid session
+
+**Additional fixes:**
+- Fixed `EvidenceCollector._onRequestFinished` — `request.response()` returns a Promise in Playwright 1.58, wrapped in `Promise.resolve()`
+- Fixed CLI `test.js` result display — read `result.summary.totalScenarios` instead of `result.total`
+- Fixed `readyIndicator` in `app.config.json` from `[data-testid='app-loaded'], #app-root` to `#root`
+- Added `this._initialized = true` at end of `initialize()` (agent health check)
+- Added `_clerkApiRequest()` helper using Node's `https` module
+
+---
+
+## First Smoke Test Run
+
+**Run ID:** `run-1771085279657-eb63`
+**Date:** 2026-02-14
+
+```
+Status:  failed (1 of 2 scenarios passed)
+Total:   2
+Passed:  1
+Failed:  1
+```
+
+- Authentication: PASSED (Clerk Backend API session injection)
+- 1 scenario passed, 1 failed
+- Non-blocking issue: `FailureHandler: this._storage.saveBug is not a function` (missing storage method, does not affect test execution)
+
 ---
 
 ## Issues Encountered
-None. All 1840 tests passed after every change.
+
+1. **Clerk factor-two on fresh browser** — Every Playwright run triggers email verification code. Solved with Backend API session injection.
+2. **EvidenceCollector crash** — `response.status is not a function` (24 per run). Playwright 1.58 changed `request.response()` to async. Fixed with `Promise.resolve()` wrapper.
+3. **CLI showing 0 tests** — Wrong result field path. Fixed to `result.summary.totalScenarios`.
+4. **readyIndicator timeout** — `#app-root` doesn't exist, actual root is `#root`. Fixed in config.
+5. **Session domain isolation** — Sign-in token creates session on Clerk's `accounts.dev` domain, not the app domain. Solved by first navigating to app (triggers redirect to accounts.dev, establishing Clerk client), then navigating to sign-in token URL which properly redirects back to the app.
 
 ---
 
-## Remaining Steps (from spec)
+## Remaining Steps
 
-The following spec steps are **not code changes** — they require manual execution on the Mac Mini:
-
-- **Step 5:** Set environment variable `BRAINSTORMY_TEST_PASSWORD` in `~/.zshrc`
-- **Step 6:** Install Playwright browsers (`npx playwright install chromium`)
-- **Step 7:** First smoke run: `node cli/index.js test --app brainstormy --agent healer --mode smoke --skip-bug-detection`
-- **Step 8:** Evaluate results — check exit code, review evidence screenshots, verify Clerk auth flow
-- **Step 9:** Iterate on selectors/timeouts if needed based on run results
+- **Step 9:** WhatsApp notification test (`node scripts/verify-whatsapp.js`)
+- Investigate `saveBug` storage method issue in FailureHandler
+- Review and triage the 1 failing scenario

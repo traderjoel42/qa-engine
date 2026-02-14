@@ -21,11 +21,14 @@ function createMockPage(options = {}) {
     goto: jest.fn().mockResolvedValue(undefined),
     click: jest.fn().mockResolvedValue(undefined),
     fill: jest.fn().mockResolvedValue(undefined),
+    type: jest.fn().mockResolvedValue(undefined),
     selectOption: jest.fn().mockResolvedValue(undefined),
-    waitForSelector: jest.fn().mockResolvedValue(undefined),
+    waitForSelector: jest.fn().mockImplementation(() => Promise.resolve(createMockElement())),
     waitForLoadState: jest.fn().mockResolvedValue(undefined),
     waitForTimeout: jest.fn().mockResolvedValue(undefined),
     waitForFunction: jest.fn().mockResolvedValue(undefined),
+    waitForURL: jest.fn().mockResolvedValue(undefined),
+    keyboard: { type: jest.fn().mockResolvedValue(undefined), press: jest.fn().mockResolvedValue(undefined) },
     $: jest.fn().mockResolvedValue(null),
     $$: jest.fn().mockResolvedValue([]),
 
@@ -58,6 +61,7 @@ function createMockPage(options = {}) {
 /**
  * Create a mock Playwright ElementHandle.
  * evaluate() returns a Promise to match Playwright's real API.
+ * Includes interaction methods (fill, click, type, hover) for auth flow tests.
  */
 function createMockElement({ text = '', value = '', html = '', attributes = {} } = {}) {
   return {
@@ -69,7 +73,16 @@ function createMockElement({ text = '', value = '', html = '', attributes = {} }
         attributes: Object.entries(attributes).map(([name, val]) => ({ name, value: val }))
       };
       return Promise.resolve(fn(mockEl));
-    })
+    }),
+    $eval: jest.fn().mockImplementation((selector, fn) => Promise.resolve(fn({ textContent: text, innerHTML: html }))),
+    $: jest.fn().mockResolvedValue(null),
+    fill: jest.fn().mockResolvedValue(undefined),
+    click: jest.fn().mockResolvedValue(undefined),
+    type: jest.fn().mockResolvedValue(undefined),
+    hover: jest.fn().mockResolvedValue(undefined),
+    isVisible: jest.fn().mockResolvedValue(true),
+    textContent: jest.fn().mockResolvedValue(text),
+    getAttribute: jest.fn().mockResolvedValue(null)
   };
 }
 
@@ -198,7 +211,7 @@ function createBrainstormyAppConfig(overrides = {}) {
           bookmarkItem: '[data-testid="bookmark-item"]',
           sessionSummaryButton: '[data-testid="session-summary-button"]',
           sessionSummaryContent: '[data-testid="session-summary"]',
-          readyIndicator: '[data-testid="app-loaded"]'
+          readyIndicator: '#root'
         },
         url_patterns: {
           project_id: 'projects\\/([a-zA-Z0-9-]+)',
