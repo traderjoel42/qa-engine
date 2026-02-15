@@ -168,6 +168,7 @@ class DeliverableRequest:
     type: str                          # 'bible' or 'report'
     template_id: str                   # For bibles: 'standard', 'character_focused', etc.
                                        # For reports: 'outline', 'character_profile', etc.
+    parameters: dict | None = None     # For reports requiring params (e.g., {'character_name': 'Elena'})
     anchor_id: str | None = None       # Optional UUID for reports (e.g., character anchor)
     trigger_after_session: int = -1    # Generate after this session (-1 = end)
 
@@ -417,10 +418,11 @@ class BrainstormyClient:
     
     # Project management
     async def create_project(self, name: str, description: str = None,
-                            medium: str = 'novel') -> dict
-        # POST /api/projects  {"name": ..., "description": ..., "medium": ..., "is_series": true}
-        # CRITICAL: Must pass is_series=true to prevent auto-creation of
-        # implicit story + initial session. Without this, the separate
+                            medium: str = 'novel',
+                            is_series: bool = True) -> dict
+        # POST /api/projects  {"name": ..., "description": ..., "medium": ..., "is_series": ...}
+        # is_series defaults to True to prevent auto-creation of implicit story +
+        # initial session. If is_series=False (the API default), the separate
         # create_story() call will create a DUPLICATE story.
         # medium defaults to 'novel' (also valid: 'film')
     async def get_project(self, project_id: str) -> dict
@@ -483,11 +485,17 @@ class BrainstormyClient:
         # For specific version: GET /api/stories/{id}/bibles/{version}?template_id=...
     
     # Reports
-    async def generate_report(self, story_id: str, type: str, 
+    async def generate_report(self, story_id: str, report_type: str, 
+                             parameters: dict = None,
                              anchor_id: str = None) -> dict
         # POST /api/stories/{story_id}/reports
-        # Request body: {"type": "outline", "anchor_id": "..."}
-        # NOTE: field is type, NOT report_type. anchor_id is optional UUID.
+        # Request body: {"type": "outline", "parameters": {...}, "anchor_id": "..."}
+        # NOTE: API field is "type", NOT "report_type". The client param is named
+        # report_type to avoid shadowing Python's builtin type(). Map it to "type"
+        # in the request body.
+        # parameters is REQUIRED for character_profile reports:
+        #   {"character_name": "Elena"} — see report_templates.py
+        # anchor_id is optional UUID.
     async def get_report(self, report_id: str) -> dict
         # GET /api/reports/{report_id}
     async def list_reports(self, story_id: str) -> list[dict]
@@ -569,9 +577,24 @@ Simulated sessions should pace messages realistically, not as fast as possible:
 - **Between messages in a session:** 2-5 second pause (simulates reading AI response)
 - **Between sessions:** 5-10 second pause (simulates session transition)
 - **After session end (summary generation):** Poll for completion, up to 120 seconds (see 3.4)
-- **After deliverable generation:** Wait for completion, up to 180 seconds
+- **Deliverable generation timeout:** 180 second HTTP request timeout (bible/report generation is **synchronous** — the LLM call completes within the HTTP request, no polling needed)
 
 These pauses also prevent overwhelming the staging environment and ensure AI responses have time to process.
+
+```python
+@dataclass(frozen=True)
+class PacingConfig:
+    message_delay_min: float = 2.0      # Min seconds between messages
+    message_delay_max: float = 5.0      # Max seconds between messages
+    session_delay_min: float = 5.0      # Min seconds between sessions
+    session_delay_max: float = 10.0     # Max seconds between sessions
+    summary_poll_interval: float = 2.0  # Initial poll interval for summary
+    summary_poll_max_interval: float = 10.0  # Max poll interval (exponential backoff cap)
+    summary_timeout: float = 120.0      # Hard timeout for summary completion
+    deliverable_timeout: float = 180.0  # HTTP request timeout for bible/report generation
+```
+
+The runner references these as `self.config.pacing.message_delay_min`, etc.
 
 ### 3.4 Summary Wait Strategy
 
@@ -640,7 +663,21 @@ class RunMetrics:
 
 ### 4.2 Memory Retention Evaluation
 
-After all sessions complete, the runner sends challenge queries as new messages in a dedicated "recall test" session. An LLM evaluator scores each response:
+After all sessions complete, the runner sends challenge queries to measure memory retention.
+
+**Session strategy:** Each challenge query is sent in its **own dedicated session** (not all in one session). This prevents earlier query-response pairs from contaminating later results — if all queries shared one session, the AI might recall facts from its own earlier answers rather than from the actual story sessions. The cost (one session per query, typically 5-8 sessions) is acceptable since challenge queries are the final step.
+
+```python
+# Runner pseudocode for challenge queries
+for query in scenario.challenge_queries:
+    session = await client.create_session(story_id, f"[Recall Test] {query.query_type}")
+    response = await client.send_message(session['id'], query.query)
+    result = await evaluator.evaluate(query, response['assistant_message']['content'])
+    retention_results.append(result)
+    await client.end_session(session['id'])  # Don't wait for summary — not needed
+```
+
+An LLM evaluator scores each response:
 
 ```python
 class RetentionEvaluator:
@@ -726,15 +763,32 @@ The simulation runner operates at the API level (fast, reliable, measurable). Sc
 class ScreenshotCapture:
     """Captures polished screenshots of simulation results via Playwright."""
     
-    def __init__(self, base_url: str, auth_session: str):
+    def __init__(self, base_url: str, clerk_secret_key: str, sim_user_id: str):
+        self.base_url = base_url
+        self.clerk_secret_key = clerk_secret_key
+        self.sim_user_id = sim_user_id
         self.browser = None
         self.page = None
     
     async def initialize(self):
-        """Launch browser, authenticate, set viewport."""
+        """Launch browser, authenticate via Clerk, set viewport.
+        
+        PHASE 3 DESIGN DECISION — Browser auth approach:
+        The test auth bypass (X-Test-User-ID) works for direct API calls but NOT
+        for browser-based Playwright sessions (the frontend uses Clerk). Options:
+        
+        (a) Replicate QA Engine's Clerk sign-in token flow in Python:
+            - Create sign-in token via Clerk Backend API (httpx)
+            - Exchange for session JWT
+            - Inject session cookie into Playwright browser context
+        (b) Call QA Engine's Playwright connector via subprocess
+        (c) Add a browser-compatible test auth bypass to the frontend
+        
+        Option (a) is recommended for independence from qa-engine.
+        """
         self.browser = await playwright.chromium.launch(headless=True)
         self.page = await self.browser.new_page(viewport={'width': 1440, 'height': 900})
-        await self.authenticate()
+        await self._authenticate_via_clerk()
     
     async def capture_project_overview(self, project_id: str) -> str:
         """Screenshot the project page showing all stories."""
@@ -904,7 +958,14 @@ class SimulationRunner:
             ))
         
         # End session and wait for summary
-        await self.client.end_session(session['id'])
+        # NOTE: end_session returns tasks_to_complete and continued_in.
+        # If continued_in is set, the session hit the message limit and 
+        # auto-created a continuation session. The runner ignores this
+        # (we control message count per session), but if a session script
+        # has many messages, this edge case could trigger. Log a warning.
+        end_response = await self.client.end_session(session['id'])
+        if end_response.get('continued_in'):
+            logger.warning(f"Session {session['id']} hit message limit, continued in {end_response['continued_in']}")
         try:
             summary_start = time.monotonic()
             await self.client.wait_for_summary(
