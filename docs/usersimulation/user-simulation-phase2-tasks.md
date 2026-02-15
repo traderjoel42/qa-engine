@@ -843,25 +843,46 @@ Replace the Phase 1 placeholder evaluation (which returns `score=0.0, facts_miss
 
 **Modify `_run_challenge_queries()`:**
 
+**Important:** Retain Phase 1's per-query `try/except` error handling and `metrics.timed()` wrapper. Each query failure should be recorded and continued past, not crash the entire evaluation.
+
 ```python
 async def _run_challenge_queries(self, story_id: str) -> list[RetentionResult]:
     evaluator = RetentionEvaluator(self.config)
     retention_results = []
     
     for query in self.scenario.challenge_queries:
-        # Create dedicated session (unchanged from Phase 1)
-        session = await self.client.create_session(
-            story_id, f"[Recall Test] {query.query_type}"
-        )
-        response = await self.client.send_message(session['id'], query.query)
-        ai_content = response['assistant_message']['content']
-        
-        # NEW: Real evaluation instead of placeholder
-        result = await evaluator.evaluate(query, ai_content)
-        retention_results.append(result)
-        
-        await self.client.end_session(session['id'])
-        # Don't wait for summary — not needed for recall tests
+        try:
+            # Create dedicated session (unchanged from Phase 1)
+            session = await self.client.create_session(
+                story_id, f"[Recall Test] {query.query_type}"
+            )
+            response = await self.metrics.timed(
+                'challenge_query',
+                self.client.send_message,
+                session['id'], query.query
+            )
+            ai_content = response['assistant_message']['content']
+            
+            # NEW: Real evaluation instead of placeholder
+            result = await evaluator.evaluate(query, ai_content)
+            retention_results.append(result)
+            
+            await self.client.end_session(session['id'])
+            # Don't wait for summary — not needed for recall tests
+        except Exception as e:
+            logger.error(f"Challenge query failed: {query.query_type} — {e}")
+            self.metrics.record_error('challenge_query', e)
+            # Record a zero-score result so metrics still reflect the failure
+            retention_results.append(RetentionResult(
+                query=query.query,
+                query_type=query.query_type,
+                established_in_session=query.established_in_session,
+                facts_present=[],
+                facts_missing=query.expected_facts,
+                contradictions=[],
+                score=0.0,
+                raw_evaluation=f"ERROR: {e}",
+            ))
     
     return retention_results
 ```
@@ -1000,7 +1021,7 @@ class CitationEvaluator:
                 template_id=deliverable_request.template_id,
                 total_citations=0, valid_citations=0, invalid_citations=0,
                 unsupported_claims=0, accuracy=0.0, hallucination_rate=0.0,
-                details='citation_map absent from API response',
+                details=[{'note': 'citation_map absent from API response'}],
             )
         
         citations = self._extract_citations(content)
@@ -1103,7 +1124,8 @@ async def _generate_deliverable(self, story_id: str,
                 'generate_report',
                 self.client.generate_report,
                 story_id, deliverable.template_id,
-                parameters=deliverable.parameters
+                parameters=deliverable.parameters,
+                anchor_id=deliverable.anchor_id
             )
         else:
             logger.warning(f"Unknown deliverable type: {deliverable.type}")
@@ -1230,7 +1252,7 @@ async def test_evaluate_bible_missing_citation_map():
     
     result = await evaluator.evaluate(deliverable_response, deliverable_request)
     assert result.total_citations == 0  # Skipped — no citation_map
-    assert 'citation_map absent' in result.details
+    assert any('citation_map absent' in d.get('note', '') for d in result.details)
 ```
 
 **Validation:**
