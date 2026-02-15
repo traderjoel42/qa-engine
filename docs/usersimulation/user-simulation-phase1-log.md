@@ -175,14 +175,50 @@
 ### Known deviation from task list
 - All modules use `from __future__ import annotations` for Python 3.9 compatibility (local env has 3.9.6 despite `.python-version` specifying 3.11.4)
 
-### Remaining for end-to-end validation
-The task list specifies running the simulation against staging to verify API interaction. This requires:
-1. A test user with `auth_provider_id = 'test_framework_simulation'` in the staging DB
-2. `BRAINSTORMY_TEST_MODE=true` on staging
-3. The test user having a configured OpenRouter API key
-4. `BRAINSTORMY_SIM_USER_ID` and `ANTHROPIC_API_KEY` env vars set locally
+### End-to-End Validation: Staging Run
 
-Once prerequisites are met, run:
-```bash
-python -m tests.simulation --scenario fantasy_ember --tier 15 --env staging --no-screenshots --verbose
-```
+**Status:** Complete (with known backend issues)
+**Timestamp:** 2026-02-14T22:29:51 — 2026-02-14T22:33:20
+**Run ID:** `fantasy_ember_15_20260214_222951_85e18c`
+
+#### Auth approach
+The test bypass auth (`X-Test-User-ID` header) requires `BRAINSTORMY_TEST_MODE=true` on the staging server, which is not enabled. Instead, we used **Clerk JWT auto-refresh** — a new auth mode added to the simulation framework:
+- `BRAINSTORMY_CLERK_SESSION_ID` — an active Clerk session ID for the `qa-automation@brainstormy.co` user
+- `CLERK_SECRET_KEY` — Clerk Backend API secret key
+- The client calls `POST https://api.clerk.dev/v1/sessions/{id}/tokens` to generate a fresh JWT (~60s TTL) before each request when the current token is near expiry
+- Added `_refresh_clerk_token()` and `_ensure_valid_token()` to `BrainstormyClient`
+- Added `clerk_session_id` and `clerk_secret_key` fields to `SimulationConfig`
+
+#### What worked
+- [x] Clerk JWT auto-refresh: tokens refreshed automatically every ~50s throughout the 3.5-minute run
+- [x] Project creation (`sim_20260214_222951_fantasy_ember`, is_series=True)
+- [x] Story creation (Book 1: The Last Ember)
+- [x] Navigator configuration (fantasy key)
+- [x] All 3 messages sent and received successfully
+- [x] Bible generation completed
+- [x] Metrics saved to `results/fantasy_ember_15_20260214_222951_85e18c/metrics.json`
+
+#### Results
+| Metric | Value |
+|--------|-------|
+| Sessions | 1 |
+| Messages sent | 3 |
+| Messages received | 3 |
+| Avg response time | 9,675 ms |
+| P95 response time | 10,554 ms |
+| Duration | 209.1s |
+| Errors | 2 |
+| Timeouts | 1 |
+
+#### Backend bugs discovered
+Two errors, both caused by the same backend bug in the `end_session` endpoint:
+
+1. **`EndSessionResponse.summary_id` validation error (HTTP 400)**: The backend's Pydantic model `EndSessionResponse` declares `summary_id: str` (required), but the actual value is `None` when the response is serialized before summary generation completes. This should be `summary_id: str | None = None` in the backend model. Affects both the main session and challenge query sessions.
+
+2. **Summary timeout (120s)**: Because `end_session` returned a 400 error, the summary generation may not have been triggered, so `wait_for_summary` polling never saw `has_summary: true`.
+
+**Action item:** Fix `EndSessionResponse.summary_id` to be `Optional[str]` in the backend (`backend/routers/sessions.py` or `backend/schemas/sessions.py`).
+
+#### Files modified for Clerk auto-refresh
+- `tests/simulation/config.py` — added `clerk_session_id`, `clerk_secret_key` fields and env var loading
+- `tests/simulation/api_client.py` — added `_refresh_clerk_token()`, `_ensure_valid_token()`, and `_TOKEN_REFRESH_MARGIN`
