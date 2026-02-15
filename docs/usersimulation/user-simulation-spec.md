@@ -60,50 +60,66 @@ The QA Engine (`qa-engine` repo) handles Playwright-based UI smoke tests â€�
 
 For each story scenario:
 
-1. **Setup** â€” Create project, story, configure API key via API
-2. **Session loop** â€” For each session in the scenario:
-   a. Create session (Explore, Focus, or Workshop type)
+1. **Setup** — Create project, create story, configure Navigator with genre key via API
+2. **Session loop** — For each session in the scenario:
+   a. Create session with name and description (session type context is conveyed through name/description — see Part 3.1 note on guidance_mode)
    b. Send message sequence (user messages from story script)
-   c. Receive and record AI responses
-   d. End session (triggers summary generation)
-   e. Optionally capture screenshots via Playwright
-3. **Deliverable generation** â€” Generate Story Bibles, reports after sufficient sessions
-4. **Challenge queries** â€” Send recall/inference questions, measure accuracy
-5. **Metrics collection** â€” Aggregate retention, citation, timing metrics
-6. **Screenshot pass** â€” Playwright captures polished screenshots of the populated project
+   c. Receive and record AI response (returned synchronously with citations in a single response)
+   d. End session (triggers async summary generation)
+   e. Wait for summary completion (poll for `has_summary: true`)
+3. **Deliverable generation** — Generate Story Bibles, reports after sufficient sessions
+4. **Challenge queries** — Send recall/inference questions, measure accuracy
+5. **Metrics collection** — Aggregate retention, citation, timing metrics
+6. **Screenshot pass** — Playwright captures polished screenshots of the populated project
+
+**API vs. Frontend behavior:** The Brainstormy frontend auto-creates a default story and session when a project is created (via the Navigator onboarding flow). The API does NOT do this — `POST /api/projects` returns only a project. The simulation correctly uses separate API calls for each creation step, but screenshots captured via Playwright may show different UI state than a project created through the frontend.
 
 ### 1.3 Repository Location
 
+**Repository:** `brainstormy-FMA-MVP` (the Brainstormy backend/frontend monorepo, NOT the `qa-engine` repo).
+
+The qa-engine is a standalone Node.js project for Playwright UI smoke tests. The simulation framework is Python and lives alongside the Brainstormy backend:
+
 ```
-brainstormy/
-â”œâ”€â”€ tests/
-â”‚   â””â”€â”€ simulation/
-â”‚       â”œâ”€â”€ runner.py              # Simulation orchestrator
-â”‚       â”œâ”€â”€ api_client.py          # Brainstormy API wrapper
-â”‚       â”œâ”€â”€ metrics.py             # Metrics collection and scoring
-â”‚       â”œâ”€â”€ screenshot.py          # Playwright screenshot capture
-â”‚       â”œâ”€â”€ stories/
-â”‚       â”‚   â”œâ”€â”€ __init__.py
-â”‚       â”‚   â”œâ”€â”€ fantasy_ember.py   # "The Last Ember" â€” fantasy/sci-fi
-â”‚       â”‚   â”œâ”€â”€ mystery_glass.py   # "The Glass Alibi" â€” mystery/thriller
-â”‚       â”‚   â””â”€â”€ romance_atlas.py   # "The Atlas of Us" â€” romance
-â”‚       â”œâ”€â”€ evaluators/
-â”‚       â”‚   â”œâ”€â”€ retention.py       # Memory retention scoring
-â”‚       â”‚   â”œâ”€â”€ citation.py        # Citation accuracy scoring
-â”‚       â”‚   â””â”€â”€ consistency.py     # Contradiction detection
-â”‚       â”œâ”€â”€ reports/
-â”‚       â”‚   â””â”€â”€ generator.py       # Benchmark report generation
-â”‚       â””â”€â”€ conftest.py            # Pytest fixtures
+brainstormy-FMA-MVP/
+├── backend/                 # Python FastAPI backend
+├── frontend/                # React frontend
+├── docs/                    # Spec and task files (referenced specs live here)
+│   ├── api-spec.md
+│   ├── brainstormy-testing-framework-spec.md
+│   └── brainstormy-testing-framework-tasks.md
+└── tests/
+    └── simulation/          # THIS FRAMEWORK
+        ├── runner.py
+        ├── api_client.py
+        ├── metrics.py
+        ├── screenshot.py
+        ├── stories/
+        │   ├── fantasy_ember.py
+        │   ├── mystery_glass.py
+        │   └── romance_atlas.py
+        ├── evaluators/
+        │   ├── retention.py
+        │   ├── citation.py
+        │   └── consistency.py
+        ├── reports/
+        │   └── generator.py
+        └── conftest.py
 ```
+
+**Why not qa-engine:** The qa-engine is pure Node.js with zero Python files. Adding Python would create a split-language project. The simulation framework uses Python to match the Brainstormy backend stack and share dependencies like `httpx`.
 
 ### 1.4 Technology Choices
 
-- **Language:** Python (matches existing Brainstormy backend and test infrastructure)
+- **Language:** Python (matches existing Brainstormy backend)
 - **API interaction:** `httpx` async client (already in Brainstormy dependencies)
-- **Screenshot capture:** Playwright (already installed for QA Engine integration)
+- **Screenshot capture:** Playwright (Python bindings; the QA Engine's Node.js Playwright is separate)
 - **Test runner:** pytest with async support (`pytest-asyncio`)
 - **Metrics storage:** JSON files per run in `tests/simulation/results/`
-- **LLM evaluation:** Claude API for challenge query scoring (same key as Brainstormy)
+- **LLM evaluation:** Claude API via `anthropic` Python SDK for challenge query scoring
+- **WhatsApp notifications:** `twilio` Python SDK (direct Twilio API calls, not importing QA Engine's Node.js modules)
+
+**Referenced specifications:** This spec references `brainstormy-testing-framework-spec.md` and `brainstormy-testing-framework-tasks.md`. These files live in `brainstormy-FMA-MVP/docs/`, NOT in the qa-engine repo. The test auth bypass pattern (`X-Test-User-ID` header, `TEST_MODE` setting) described in Task 1.4b of `brainstormy-testing-framework-tasks.md` may or may not be implemented yet — Claude Code should verify during Phase 1.
 
 ---
 
@@ -129,7 +145,7 @@ class SessionScript:
     """One brainstorming session's worth of user messages."""
     name: str                          # Session name (visible in UI)
     description: str | None            # Session description
-    guidance_mode: str                 # 'explore' or 'focus' (formerly 'develop')
+    guidance_mode: str                 # 'explore' or 'focus' — see note below
     template: str | None               # For focus sessions: 'character', 'plot', etc.
     messages: list[str]                # User messages to send, in order
     expected_facts: list[str]          # Facts this session should establish (for metrics)
@@ -154,7 +170,7 @@ class DeliverableRequest:
 @dataclass
 class StoryScenario:
     """Complete story simulation scenario."""
-    id: str                            # e.g., 'fantasy_ember_25'
+    id: str                            # e.g., 'fantasy_ember'
     name: str                          # e.g., 'The Last Ember'
     genre: str                         # 'fantasy', 'mystery', 'romance'
     description: str                   # Brief story premise
@@ -163,8 +179,14 @@ class StoryScenario:
     sessions: list[SessionScript]      # Ordered session scripts
     challenge_queries: list[ChallengeQuery]  # Post-simulation recall tests
     deliverables: list[DeliverableRequest]   # Bibles/reports to generate
-    scale_tier: str                    # '15', '50', '100' â€” which progressive tier
+    navigator_key: str = 'general_editorial'  # Navigator primary key for genre config
 ```
+
+**Note on `guidance_mode` and `template`:** The `api-spec.md` document only shows `name` and `description` as session creation parameters. However, the `focus-mode-spec.md` documents that `guidance_mode` and `template` are real database columns on the sessions table (added during Focus Mode implementation). The actual backend endpoint (`backend/api/sessions.py`) likely accepts these fields. **Claude Code must verify against the actual backend code during implementation.** If the API does NOT accept these fields, the simulation should embed session type context in the `description` field instead (e.g., `description="Focus session on character development"`).
+
+**Note on `navigator_key`:** Each scenario specifies a Navigator key for genre-appropriate AI responses. See Part 3.1 for the `configure_navigator()` method. Valid keys include: `fantasy`, `mystery`, `romance`, `thriller`, `literary_fiction`, `general_editorial`, etc. (defined in `backend/config/navigators/fiction.py`).
+
+**Note on untested deliverable types:** `character_focused` bibles and `relationship_map`/`theme_analysis` reports exist in the API spec but have never been exercised by the QA Engine. Plan for potential bugs when these are first used in Phase 2 and Phase 4 respectively.
 
 ### 2.3 Story Scenarios
 
@@ -371,85 +393,149 @@ class GeneratedSessionOutline:
 
 ### 3.1 Client Design
 
-The API client wraps Brainstormy's REST API with async methods matching the simulation workflow:
+The API client wraps Brainstormy's REST API with async methods matching the simulation workflow. All paths are relative to the base URL (e.g., `https://brainstormy-staging.onrender.com`).
 
 ```python
 class BrainstormyClient:
     """Async client for Brainstormy API, authenticated as a test user."""
     
-    def __init__(self, base_url: str, auth_token: str):
+    def __init__(self, base_url: str, auth_headers: dict):
         self.base_url = base_url
-        self.auth_token = auth_token
+        self.auth_headers = auth_headers
         self.client = httpx.AsyncClient(...)
     
-    # Project/Story management
+    # Project management
     async def create_project(self, name: str, description: str = None) -> dict
+        # POST /api/projects
+    async def get_project(self, project_id: str) -> dict
+        # GET /api/projects/{project_id}
+    async def list_projects(self) -> list[dict]
+        # GET /api/projects
+    async def delete_project(self, project_id: str) -> None
+        # DELETE /api/projects/{project_id} — cascade deletes everything
+    
+    # Story management (nested under project)
     async def create_story(self, project_id: str, name: str, description: str = None) -> dict
+        # POST /api/projects/{project_id}/stories
+    async def get_story(self, story_id: str) -> dict
+        # GET /api/stories/{story_id}
     
-    # Session lifecycle
+    # Navigator configuration (per-story genre guidance)
+    async def configure_navigator(self, story_id: str, primary_key: str,
+                                   secondary_keys: list[str] = None,
+                                   story_flavor: str = None) -> dict
+        # PUT /api/stories/{story_id}/navigator
+    
+    # Session lifecycle (nested under story)
     async def create_session(self, story_id: str, name: str, 
-                            guidance_mode: str = 'explore',
+                            description: str = None,
+                            guidance_mode: str = None,
                             template: str = None) -> dict
-    async def send_message(self, session_id: str, content: str) -> dict
-    async def get_messages(self, session_id: str) -> list[dict]
+        # POST /api/stories/{story_id}/sessions
+        # NOTE: guidance_mode and template may or may not be accepted by the API.
+        # Claude Code must verify against backend/api/sessions.py.
+        # If not accepted, omit them and embed session type in description.
+    async def get_session(self, session_id: str) -> dict
+        # GET /api/sessions/{session_id} — includes has_summary field
     async def end_session(self, session_id: str) -> dict
+        # POST /api/sessions/{session_id}/end
+    async def send_message(self, session_id: str, content: str) -> dict
+        # POST /api/sessions/{session_id}/messages
+        # Returns BOTH user_message AND assistant_message synchronously
+        # in a single response, along with citation_map.
+        # No need for a separate wait_for_response — the AI response
+        # is included inline. Response time = full round-trip.
+    async def get_messages(self, session_id: str, limit: int = 50) -> list[dict]
+        # GET /api/sessions/{session_id}/messages
+        # Mainly useful for post-hoc analysis, not real-time tracking.
     
-    # Deliverables
+    # Story Bibles
     async def generate_bible(self, story_id: str, template_key: str) -> dict
+        # POST /api/stories/{story_id}/bibles
+    async def get_bible(self, story_id: str, template_key: str) -> dict
+        # GET /api/stories/{story_id}/bibles/{template_key}
+    
+    # Reports
     async def generate_report(self, story_id: str, report_type: str, 
                              parameters: dict = None) -> dict
-    async def get_bible(self, story_id: str, template_key: str) -> dict
+        # POST /api/stories/{story_id}/reports
     async def get_report(self, report_id: str) -> dict
+        # GET /api/reports/{report_id}
+    async def list_reports(self, story_id: str) -> list[dict]
+        # GET /api/stories/{story_id}/reports
     
-    # Search (for metrics validation)
+    # Search
     async def search(self, story_id: str, query: str, limit: int = 20) -> list[dict]
+        # POST /api/stories/{story_id}/search
     
     # Bookmarks
     async def create_bookmark(self, story_id: str, message_id: str, 
-                             title: str, category: str = None) -> dict
+                             user_title: str, category: str = None) -> dict
+        # POST /api/stories/{story_id}/bookmarks/message
+        # Note: field is user_title, not title
+    async def list_bookmarks(self, story_id: str, category: str = None) -> list[dict]
+        # GET /api/stories/{story_id}/bookmarks
     
     # Summary polling
     async def wait_for_summary(self, session_id: str, 
-                               timeout: float = 120.0) -> dict:
-        """Poll GET /api/sessions/{id} for has_summary: true.
-        Exponential backoff: 2s initial → 10s max interval.
-        Raises TimeoutError after timeout seconds."""
+                               timeout: float = 120.0) -> dict
+        # Polls GET /api/sessions/{session_id} for has_summary: true.
+        # Exponential backoff: 2s initial, 1.5x multiplier, 10s max interval.
+        # Raises TimeoutError after timeout seconds.
     
     # Preflight validation
-    async def preflight_check(self) -> dict:
-        """Verify API reachable and auth valid before starting a run.
-        Returns {'api_reachable': bool, 'auth_valid': bool, 'can_list_projects': bool}"""
+    async def preflight_check(self) -> dict
+        # Verifies API reachable and auth valid before starting a run.
+        # Returns {'api_reachable': bool, 'auth_valid': bool}
 ```
+
+**Response envelope:** All API responses wrap data in `{"data": {...}}`. The client must unwrap this — all methods return the inner `data` value.
+
+**Retry logic:** Retry on 429 (rate limit), 502, 503 (Render cold starts), 504 with exponential backoff. Max 3 retries. Also retry on `httpx.TimeoutException` and `httpx.ConnectError`.
 
 ### 3.2 Authentication
 
-The simulation uses a single dedicated Clerk test user for all scenarios. Scenario isolation is achieved through unique project names (timestamp-prefixed), not separate users. This avoids multi-Clerk setup complexity while maintaining full data isolation since projects are already separated by `project_id`.
+The simulation uses a single dedicated Clerk user for all scenarios. Scenario isolation is achieved through unique project names (timestamp-prefixed), not separate users.
 
-**Staging:** Authenticate via Clerk session token stored in `BRAINSTORMY_SIM_AUTH_TOKEN` env var, sent as `Authorization: Bearer {token}` header. The token must be obtained manually and refreshed when it expires.
+**Primary approach: Clerk Backend API sign-in tokens (recommended)**
 
-**Local:** If the test auth bypass from `brainstormy-testing-framework-tasks.md` (Task 1.4b) is implemented, use the `X-Test-User-ID` header instead. This avoids token expiry issues during development.
+The QA Engine already solves the token expiry problem by creating sign-in tokens on-the-fly via the Clerk Backend API using `CLERK_SECRET_KEY`. The simulation should use the same approach. This requires:
+
+- `CLERK_SECRET_KEY` env var (the Clerk Backend API key, NOT a session token)
+- `BRAINSTORMY_SIM_USER_ID` env var (the Clerk user ID of the simulation user)
+
+The client creates a fresh sign-in token before each simulation run:
 
 ```python
-# Staging: Clerk session token
-client = BrainstormyClient(
-    base_url="https://brainstormy-staging.onrender.com",
-    auth_token=os.environ["BRAINSTORMY_SIM_AUTH_TOKEN"]
-)
-
-# Local (if test bypass exists): X-Test-User-ID header
-client = BrainstormyClient(
-    base_url="http://localhost:8000",
-    auth_token=None,
-    test_user_id="sim-test-user"
-)
+async def get_auth_token(clerk_secret_key: str, user_id: str) -> str:
+    """Create a fresh Clerk sign-in token via the Backend API."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"https://api.clerk.com/v1/sign_in_tokens",
+            headers={"Authorization": f"Bearer {clerk_secret_key}"},
+            json={"user_id": user_id}
+        )
+        token_data = response.json()
+        # Use the token to create a session via Clerk's Frontend API
+        # The exact flow depends on Clerk's API — Claude Code should verify
+        # against the QA Engine's _clerkApiRequest() implementation
+        return token_data["token"]
 ```
+
+**Fallback: Static session token**
+
+If the Clerk Backend API approach proves complex to implement in Phase 1, fall back to a manually-obtained session token stored in `BRAINSTORMY_SIM_AUTH_TOKEN`. This works for one-off runs but tokens expire (typically 7-30 days). Document the expiry limitation.
+
+**Local development: Test auth bypass**
+
+If the test auth bypass from `brainstormy-testing-framework-tasks.md` (Task 1.4b) is implemented, use the `X-Test-User-ID` header for local runs. Check for `backend/middleware/test_auth.py` and `TEST_MODE` setting.
 
 **One-time setup for the simulation Clerk user:**
 1. Create a dedicated Clerk user for simulation (or designate an existing test user)
 2. Log in to staging as that user
-3. Configure a valid OpenRouter API key in Brainstormy Settings → API Keys
-4. Verify by starting a quick Explore session and confirming AI responses work
-5. Obtain a session token and set `BRAINSTORMY_SIM_AUTH_TOKEN`
+3. Configure a valid OpenRouter API key in Brainstormy Settings
+4. Record the Clerk user ID for `BRAINSTORMY_SIM_USER_ID`
+5. Obtain the `CLERK_SECRET_KEY` from the Clerk Dashboard (Backend API Keys section)
 
 ### 3.3 Rate Limiting and Pacing
 
@@ -726,6 +812,13 @@ class SimulationRunner:
         project = await self.client.create_project(project_name)
         story = await self.client.create_story(project['id'], self.scenario.story_name)
         self.metrics.set_resource_ids(project['id'], story['id'])
+        
+        # 1b. Configure Navigator for genre-appropriate AI responses
+        if self.scenario.navigator_key and self.scenario.navigator_key != 'general_editorial':
+            await self.client.configure_navigator(
+                story['id'], 
+                primary_key=self.scenario.navigator_key
+            )
         
         # 2. Run sessions
         sessions = self.scenario.get_sessions_for_tier(self.tier)
@@ -1101,7 +1194,7 @@ Phases 1-3 deliver the highest immediate value: one working scenario with metric
 
 **2. Data cleanup:** Preserve simulation projects on staging by default. `--cleanup` CLI flag available to delete after run. Preserved projects enable screenshot re-capture, manual QA inspection, marketing asset mining, and demo walkthroughs. Metrics JSON is always saved locally regardless of cleanup.
 
-**3. Session end timing:** Poll `GET /api/sessions/{id}` for `has_summary: true` with exponential backoff (2s initial → 10s max interval, 120s hard timeout). On timeout, log warning and continue — don't abort the run. See Part 3.4 for full detail. **WhatsApp notification:** The runner should send a WhatsApp notification upon simulation run completion (success or failure) using the same Twilio integration as the QA Engine. This requires verifying that the QA Engine's WhatsApp communication system is operational. The notification should include: scenario name, tier, pass/fail status, retention score, and duration.
+**3. Session end timing:** Poll `GET /api/sessions/{id}` for `has_summary: true` with exponential backoff (2s initial → 10s max interval, 120s hard timeout). On timeout, log warning and continue — don't abort the run. See Part 3.4 for full detail. **WhatsApp notification:** The runner should send a WhatsApp notification upon simulation run completion (success or failure). This uses the `twilio` Python SDK to call the Twilio API directly — it does NOT import the QA Engine's Node.js modules (cross-language imports are not possible). The notification should include: scenario name, tier, pass/fail status, retention score, and duration. Requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, and `TWILIO_WHATSAPP_TO` env vars. If Twilio credentials are absent, skip notification silently.
 
 **4. OpenRouter API key:** Pre-configured manually in the simulation Clerk user's Brainstormy account settings. One-time setup. The runner's preflight check (Part 3.5) verifies auth works before committing to a long run. No programmatic key management.
 
