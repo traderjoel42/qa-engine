@@ -25,7 +25,7 @@ Before starting Phase 2:
 
 **File:** `tests/simulation/stories/fantasy_ember.py`
 
-Replace the placeholder `FANTASY_EMBER_PLACEHOLDER` (1 session, 3 messages) with the full `FANTASY_EMBER` scenario shell containing all 15 `SessionScript` entries. Start with metadata only (name, guidance_mode, template, focus_target_name, expected_facts, description) — messages are filled in by subsequent sub-tasks.
+Replace the existing `FANTASY_EMBER` placeholder (1 session, 3 messages) with the full 15-session scenario. Start with metadata only (name, guidance_mode, template, focus_target_name, expected_facts, description) — messages are filled in by subsequent sub-tasks.
 
 Use the session arc table from the spec (Part 2.3, Scenario 1):
 
@@ -676,6 +676,7 @@ python -m tests.simulation --scenario fantasy_ember --tier 15 --env staging --ve
 - [ ] Focus sessions: Does the API accept `template` + `focus_target_name` combinations correctly?
 - [ ] Character profiles: Does `character_profile` report type work with `parameters={'character_name': '...'}?`
 - [ ] Character-focused bible: Does `character_focused` template_id work? (Never tested before — see spec note)
+- [ ] Bible citation_map: Does the bible API response include `citation_map`? If not, the `BibleResponse` Pydantic model at `backend/api/bibles.py:37-48` needs `citation_map: dict[str, str] = {}` added. This is a prerequisite for bible citation evaluation (see C3 in feasibility review).
 - [ ] Outline report: Does `outline` report type work?
 - [ ] Challenge queries: Are dedicated sessions created and ended properly?
 - [ ] Message limit: Is any session hitting the message-per-session limit? (Watch for `continued_in` in end_session response)
@@ -706,13 +707,13 @@ cat tests/simulation/results/*/metrics.json | python -m json.tool | head -50
 **Expected metrics structure:**
 - `scenario_id`: "fantasy_ember"
 - `tier`: 15
-- `sessions_completed`: 15
+- `total_sessions`: 15
 - `messages_sent`: 60-70
-- `deliverables_generated`: 5
-- `challenge_queries_run`: 5
 - `retention_results`: 5 entries (all with `score: 0.0` — placeholder until Task 2.5)
 - `response_times_ms`: array of timing measurements
 - `errors`: ideally empty
+
+**Note:** `RunMetrics` does not have dedicated `deliverables_generated` or `challenge_queries_run` fields. Deliverable and challenge query counts are inferred from `retention_results` length and the deliverable timing entries in `response_times_ms`. If explicit counts are needed for reporting, add them to `RunMetrics` in this task.
 
 **Validation:**
 - [ ] Full 15-session run completes without aborting
@@ -748,6 +749,8 @@ cat tests/simulation/results/*/metrics.json | python -m json.tool | head -50
 **File:** `tests/simulation/evaluators/retention.py`
 
 ```python
+from __future__ import annotations
+
 import json
 import anthropic
 from ..models import ChallengeQuery, RetentionResult
@@ -757,7 +760,7 @@ class RetentionEvaluator:
     """Scores whether AI responses contain expected facts using Claude as judge."""
     
     def __init__(self, config: SimulationConfig):
-        self.client = anthropic.Anthropic()  # Uses ANTHROPIC_API_KEY env var
+        self.client = anthropic.AsyncAnthropic()  # Uses ANTHROPIC_API_KEY env var
         self.model = config.evaluation.model  # e.g., 'claude-sonnet-4-5-20250929'
     
     async def evaluate(self, query: ChallengeQuery, ai_response: str) -> RetentionResult:
@@ -806,19 +809,21 @@ Respond as JSON with this exact structure:
 
 **Implementation details:**
 - Use the `anthropic` Python SDK (already in requirements for the project)
-- Use `client.messages.create()` with `response_format` or parse JSON from text response
+- Use `anthropic.AsyncAnthropic()` (not sync `Anthropic()`) since `evaluate()` is async — avoids blocking the event loop during API calls
+- Use `client.messages.create()` and parse JSON from the text response
 - Model: Use `claude-sonnet-4-5-20250929` for cost efficiency (not Opus — evaluation doesn't need max intelligence)
-- Set `max_tokens=1024` — evaluation responses are short
+- Set `max_tokens=2048` — matches existing `EvaluationConfig` default
 - Parse JSON from the response, handling potential formatting issues (code blocks, trailing text)
 - Map parsed fields to `RetentionResult` dataclass
 
-**Config addition:** Add `evaluation.model` to `SimulationConfig` if not already present:
+**Config note:** `EvaluationConfig` already exists at `config.py:55` with `max_tokens: int = 2048`. Do NOT create a duplicate — use the existing config. If `model` or `temperature` fields need to be added, extend the existing dataclass.
 
 ```python
+# Existing EvaluationConfig — extend if needed, don't duplicate
 @dataclass
 class EvaluationConfig:
     model: str = 'claude-sonnet-4-5-20250929'
-    max_tokens: int = 1024
+    max_tokens: int = 2048
     temperature: float = 0.0  # Deterministic for evaluation
 ```
 
@@ -939,7 +944,25 @@ The existing test framework has a citation evaluator spec (from `brainstormy-tes
 
 **File:** `tests/simulation/evaluators/citation.py`
 
+**Critical: Bible vs Report response shapes differ.** The evaluator must handle both:
+
+| Field | Reports | Bibles |
+|-------|---------|--------|
+| Content | `content: str` | `sections: Dict[str, str]` |
+| Citations | `citation_map: Dict[str, str]` | **NOT in BibleResponse Pydantic model** |
+
+**Bible citation_map issue (C3):** The backend's `BibleResponse` model at `backend/api/bibles.py:37-48` does NOT declare `citation_map`. While the bible service internally generates a citation_map, FastAPI/Pydantic v2 strips undeclared fields during serialization (`extra='ignore'`). This means citation evaluation for bibles may be impossible without a backend fix.
+
+**Resolution options (decide during implementation):**
+1. **Fix backend** — Add `citation_map: dict[str, str] = {}` to `BibleResponse` Pydantic model. This is the cleanest fix and benefits the product beyond just simulation.
+2. **Reports only** — Skip citation evaluation for bibles, only evaluate reports (which DO include `citation_map`). Log a warning for bibles.
+3. **Separate API call** — If the bible is stored with citation_map in the database, fetch it via a different endpoint.
+
+**Recommended: Option 1 (fix backend) + Option 2 as fallback.** If the backend fix isn't feasible immediately, the evaluator should gracefully skip bibles and only evaluate report citations.
+
 ```python
+from __future__ import annotations
+
 import re
 from ..models import CitationResult, DeliverableRequest
 
@@ -953,35 +976,72 @@ class CitationEvaluator:
         """
         self.client = client
     
-    async def evaluate(self, deliverable_content: dict, 
+    async def evaluate(self, deliverable_response: dict, 
                        deliverable_request: DeliverableRequest) -> CitationResult:
         """
-        1. Extract the rendered content and citation_map from the deliverable
-        2. Parse citation short-IDs from the content (e.g., [abc12345])
-        3. Validate each citation against the citation_map
-        4. Check for claims without citations (potential hallucinations)
+        1. Extract text content from the deliverable (handling bible vs report shapes)
+        2. Extract citation_map (may be absent for bibles — see C3 note above)
+        3. Parse citation short-IDs from the content
+        4. Validate each citation against the citation_map
         5. Return CitationResult with accuracy metrics
         """
+        # Handle different response shapes
+        content = self._extract_content(deliverable_response, deliverable_request)
+        citation_map = deliverable_response.get('citation_map')
+        
+        if citation_map is None:
+            logger.warning(
+                f"No citation_map in {deliverable_request.type}/{deliverable_request.template_id} "
+                f"response — skipping citation evaluation. "
+                f"{'Bible citation_map not in BibleResponse Pydantic model (needs backend fix).' if deliverable_request.type == 'bible' else 'Unexpected missing citation_map for report.'}"
+            )
+            return CitationResult(
+                deliverable_type=deliverable_request.type,
+                template_id=deliverable_request.template_id,
+                total_citations=0, valid_citations=0, invalid_citations=0,
+                unsupported_claims=0, accuracy=0.0, hallucination_rate=0.0,
+                details='citation_map absent from API response',
+            )
+        
+        citations = self._extract_citations(content)
+        # ... validate and return result
+    
+    def _extract_content(self, response: dict, request: DeliverableRequest) -> str:
+        """Extract text content from deliverable response.
+        
+        Reports have `content: str`.
+        Bibles have `sections: Dict[str, str]` — join all section values.
+        """
+        if request.type == 'report':
+            return response.get('content', '')
+        elif request.type == 'bible':
+            sections = response.get('sections', {})
+            return '\n\n'.join(sections.values())
+        return ''
     
     def _extract_citations(self, content: str) -> list[str]:
         """Extract citation short-IDs from content using regex.
         
-        Brainstormy citations use format: [short_id] where short_id 
-        is a short alphanumeric string mapping to a full message UUID.
+        Brainstormy citations use exactly 8 lowercase hex characters.
+        Source: backend/services/citation_utils.py:44 validates with r'^[a-f0-9]{8}$'
+        and citation_utils.py:99 generates IDs via result_id.replace('-', '')[:8].
         """
-        # Pattern matches [A1], [B3], [abc12345], etc.
-        return re.findall(r'\[([A-Za-z0-9]+)\]', content)
+        return re.findall(r'\[([a-f0-9]{8})\]', content)
     
     def _validate_citation(self, short_id: str, citation_map: dict) -> dict:
         """Check if a citation short-ID exists in the citation_map.
         
-        Returns: {'short_id': str, 'valid': bool, 'message_uuid': str | None}
+        Note: citation_map values are source UUIDs which may reference
+        messages, summaries, OR bookmarks (not just messages).
+        See backend/services/report.py:145-158 for source types.
+        
+        Returns: {'short_id': str, 'valid': bool, 'source_uuid': str | None}
         """
     
     async def _check_content_relevance(self, short_id: str, 
                                         surrounding_text: str,
-                                        message_content: str) -> bool:
-        """Optional: Use LLM to verify the cited message supports the claim.
+                                        source_content: str) -> bool:
+        """Optional: Use LLM to verify the cited source supports the claim.
         
         For Phase 2, start with existence-only validation.
         Content relevance checking can be added later if hallucination 
@@ -992,11 +1052,16 @@ class CitationEvaluator:
 ```
 
 **Citation evaluation flow:**
-1. Bible/report API response includes `content` (rendered text) and `citation_map` (dict of `short_id` → `message_uuid`)
-2. Extract all `[short_id]` patterns from `content`
-3. For each extracted short_id: check if it exists as a key in `citation_map`
-4. Valid = short_id found in citation_map. Invalid = short_id not found.
-5. Compute metrics: `accuracy = valid / total`, `hallucination_rate = unsupported / total`
+1. Extract text: For reports, use `content` field. For bibles, join `sections.values()`.
+2. Get `citation_map` from response — if absent (bibles without backend fix), return skip result.
+3. Extract all `[short_id]` patterns matching exactly 8 lowercase hex chars.
+4. For each extracted short_id: check if it exists as a key in `citation_map`.
+5. Valid = short_id found in citation_map. Invalid = short_id not found.
+6. Compute metrics: `accuracy = valid / total`, `hallucination_rate = unsupported / total`
+
+**Important: Citation regex must use `r'\[([a-f0-9]{8})\]'`** — not a broad `[A-Za-z0-9]+` pattern, which would match Markdown links, section references, and other bracketed text, producing massive false positives. The 8-hex-char pattern matches the actual backend format (confirmed in `backend/services/citation_utils.py`).
+
+**Note:** The existing `tests/framework/evaluators/citation_evaluator.py` uses `r'\[([A-Z]\d+)\]'` which matches `[A1]`, `[B3]` patterns — this is also wrong and doesn't match the actual 8-hex-char format. Do NOT reuse that regex.
 
 **What counts as "unsupported":** For Phase 2, we only count citations with invalid short-IDs as errors. Phase 3+ can add LLM-based content relevance checking (does the cited message actually support the claim?).
 
@@ -1017,25 +1082,29 @@ Modify deliverable generation to capture responses and run citation evaluation.
 
 **Modify `_generate_deliverable()`:**
 
+**Critical: `metrics.timed()` is an async function, NOT a context manager.** Its signature is `async def timed(self, label: str, coro_func: Callable, *args, **kwargs) -> Any`. Do NOT use `with self.metrics.timed(...)` — that would raise `AttributeError: 'coroutine' object does not support the context manager protocol`. Use the correct Phase 1 pattern:
+
 ```python
 async def _generate_deliverable(self, story_id: str, 
                                  deliverable: DeliverableRequest) -> dict | None:
-    """Generate a deliverable and run citation evaluation.
+    """Generate a deliverable and return the API response for citation evaluation.
     
     Returns the deliverable response dict, or None on failure.
     """
     try:
         if deliverable.type == 'bible':
-            with self.metrics.timed('generate_bible', deliverable.template_id):
-                response = await self.client.generate_bible(
-                    story_id, deliverable.template_id
-                )
+            response = await self.metrics.timed(
+                'generate_bible',
+                self.client.generate_bible,
+                story_id, deliverable.template_id
+            )
         elif deliverable.type == 'report':
-            with self.metrics.timed('generate_report', deliverable.template_id):
-                response = await self.client.generate_report(
-                    story_id, deliverable.template_id,
-                    parameters=deliverable.parameters
-                )
+            response = await self.metrics.timed(
+                'generate_report',
+                self.client.generate_report,
+                story_id, deliverable.template_id,
+                parameters=deliverable.parameters
+            )
         else:
             logger.warning(f"Unknown deliverable type: {deliverable.type}")
             return None
@@ -1044,9 +1113,11 @@ async def _generate_deliverable(self, story_id: str,
         return response
     except Exception as e:
         logger.error(f"Deliverable generation failed: {e}")
-        self.metrics.record_error('deliverable', str(e))
+        self.metrics.record_error('deliverable', e)  # Pass Exception object, not str(e)
         return None
 ```
+
+**Note on `record_error()`:** `MetricsCollector.record_error()` expects `(operation: str, error: Exception)`. Passing `str(e)` would cause `type(error).__name__` to return `'str'` instead of the actual exception class name. Always pass the raw exception object `e`.
 
 **Modify the main `run()` flow to collect deliverable responses and evaluate citations:**
 
@@ -1077,52 +1148,98 @@ metrics = self.metrics.compile(retention_results, citation_results=citation_resu
 **File:** `tests/simulation/evaluators/test_citation.py`
 
 ```python
+from __future__ import annotations
+
 import pytest
 from tests.simulation.evaluators.citation import CitationEvaluator
+from tests.simulation.models import DeliverableRequest
 
-def test_extract_citations():
-    evaluator = CitationEvaluator(client=None)  # Client not needed for extraction
+def test_extract_citations_8hex():
+    """Citations are exactly 8 lowercase hex characters."""
+    evaluator = CitationEvaluator(client=None)
     
-    content = "Elena is an artificer [a1b2c3] who works in her grandfather's workshop [d4e5f6]."
+    content = "Elena is an artificer [a1b2c3d4] who works in her grandfather's workshop [e5f6a7b8]."
     citations = evaluator._extract_citations(content)
-    assert citations == ['a1b2c3', 'd4e5f6']
+    assert citations == ['a1b2c3d4', 'e5f6a7b8']
+
+def test_extract_citations_ignores_non_citation_brackets():
+    """Should NOT match Markdown links, section names, or wrong-length IDs."""
+    evaluator = CitationEvaluator(client=None)
+    
+    content = "See [Elena] in the [Characters] section. Also [a1b2c3d4] is cited. Short [abc] ignored."
+    citations = evaluator._extract_citations(content)
+    assert citations == ['a1b2c3d4']  # Only the 8-hex-char match
 
 def test_validate_citation_valid():
     evaluator = CitationEvaluator(client=None)
-    citation_map = {'a1b2c3': 'uuid-1234', 'd4e5f6': 'uuid-5678'}
+    citation_map = {'a1b2c3d4': 'uuid-1234', 'e5f6a7b8': 'uuid-5678'}
     
-    result = evaluator._validate_citation('a1b2c3', citation_map)
+    result = evaluator._validate_citation('a1b2c3d4', citation_map)
     assert result['valid'] is True
-    assert result['message_uuid'] == 'uuid-1234'
+    assert result['source_uuid'] == 'uuid-1234'
 
 def test_validate_citation_invalid():
     evaluator = CitationEvaluator(client=None)
-    citation_map = {'a1b2c3': 'uuid-1234'}
+    citation_map = {'a1b2c3d4': 'uuid-1234'}
     
-    result = evaluator._validate_citation('xxxxxx', citation_map)
+    result = evaluator._validate_citation('deadbeef', citation_map)
     assert result['valid'] is False
 
 @pytest.mark.asyncio
-async def test_evaluate_full():
+async def test_evaluate_report():
+    """Reports have content + citation_map."""
     evaluator = CitationEvaluator(client=None)
     deliverable_response = {
-        'content': 'Elena [a1] is an artificer [b2] with unknown origins [c3].',
-        'citation_map': {'a1': 'uuid-1', 'b2': 'uuid-2'},  # c3 is NOT in map
+        'content': 'Elena [a1b2c3d4] is an artificer [e5f6a7b8] with unknown origins [deadbeef].',
+        'citation_map': {'a1b2c3d4': 'uuid-1', 'e5f6a7b8': 'uuid-2'},  # deadbeef NOT in map
     }
-    deliverable_request = DeliverableRequest(type='bible', template_id='standard')
+    deliverable_request = DeliverableRequest(type='report', template_id='character_profile')
     
     result = await evaluator.evaluate(deliverable_response, deliverable_request)
     assert result.total_citations == 3
     assert result.valid_citations == 2
     assert result.invalid_citations == 1
     assert result.accuracy == pytest.approx(2/3, rel=0.01)
+
+@pytest.mark.asyncio
+async def test_evaluate_bible_with_sections():
+    """Bibles have sections dict, not content string."""
+    evaluator = CitationEvaluator(client=None)
+    deliverable_response = {
+        'sections': {
+            'characters': 'Elena [a1b2c3d4] is the protagonist.',
+            'world': 'Magic flows through ember lines [e5f6a7b8].',
+        },
+        'citation_map': {'a1b2c3d4': 'uuid-1', 'e5f6a7b8': 'uuid-2'},
+    }
+    deliverable_request = DeliverableRequest(type='bible', template_id='standard')
+    
+    result = await evaluator.evaluate(deliverable_response, deliverable_request)
+    assert result.total_citations == 2
+    assert result.valid_citations == 2
+
+@pytest.mark.asyncio
+async def test_evaluate_bible_missing_citation_map():
+    """Bibles may not include citation_map (C3 — not in BibleResponse Pydantic model)."""
+    evaluator = CitationEvaluator(client=None)
+    deliverable_response = {
+        'sections': {'characters': 'Elena [a1b2c3d4] is the protagonist.'},
+        # No citation_map — stripped by Pydantic serialization
+    }
+    deliverable_request = DeliverableRequest(type='bible', template_id='standard')
+    
+    result = await evaluator.evaluate(deliverable_response, deliverable_request)
+    assert result.total_citations == 0  # Skipped — no citation_map
+    assert 'citation_map absent' in result.details
 ```
 
 **Validation:**
-- [ ] Citation extraction regex works on real Brainstormy content patterns
+- [ ] Citation extraction regex correctly matches 8 lowercase hex chars only
+- [ ] Regex does NOT match `[Elena]`, `[Characters]`, `[A1]`, or other non-citation brackets
+- [ ] Bible response handled via `sections` dict (joined values)
+- [ ] Report response handled via `content` string
+- [ ] Missing `citation_map` returns graceful skip result (not crash)
 - [ ] Valid/invalid distinction works correctly
-- [ ] Full evaluation produces correct CitationResult
-- [ ] Edge cases handled: no citations, empty citation_map, no content field
 
 **After completion:** `git add tests/simulation/evaluators/ tests/simulation/runner.py && git commit -m "Phase 2.6: Citation evaluator with integration" && git push`
 
@@ -1144,11 +1261,11 @@ cat tests/simulation/results/*/metrics.json | python -m json.tool
 - [ ] 15 sessions run to completion (~60-70 messages sent)
 - [ ] 5 deliverables generated (2 after session 10, 3 after session 15)
 - [ ] 5 challenge queries evaluated with real LLM-based retention scores
-- [ ] Citation accuracy computed for all deliverables
+- [ ] Citation accuracy computed for all deliverables with `citation_map` (reports guaranteed; bibles depend on backend fix — see C3)
 - [ ] Metrics JSON contains retention scores (not placeholder 0.0)
-- [ ] Metrics JSON contains citation accuracy (not None)
+- [ ] Metrics JSON contains citation accuracy (not None) for at least reports
 - [ ] Average retention score ≥ 0.70 (reasonable for first run — target is 0.85+)
-- [ ] Citation accuracy ≥ 0.80 for standard bible
+- [ ] Citation accuracy ≥ 0.80 for reports (outline, character profiles); bible accuracy pending backend fix
 - [ ] No unresolved errors in metrics
 - [ ] WhatsApp notification sent with summary stats
 - [ ] Total runtime ≤ 30 minutes
