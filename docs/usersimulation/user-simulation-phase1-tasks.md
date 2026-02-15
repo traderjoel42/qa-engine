@@ -51,12 +51,20 @@ Requirements:
 ### Naming Conventions
 
 - Session guidance modes: `explore` or `focus` (NOT `develop` — renamed per `focus-mode-spec.md`)
-- Focus templates: `character`, `plot`, `world`, `scene`, `dialogue`, `custom`
+- Focus templates: `character`, `plot`, `scene`, `world`, `logline`, `dialogue`, `outline_section` (plus workshop-specific: `workshop_theme`, `workshop_act`, `workshop_sequence`, `workshop_scene`, `workshop_beat`, `workshop_structure`)
 - Project name format: `sim_{YYYYMMDD}_{HHMMSS}_{scenario_id}`
 
 ### Session Creation — Confirmed Parameters
 
 **Confirmed:** `POST /api/stories/{story_id}/sessions` accepts `guidance_mode` and `template` in the request body. Valid `guidance_mode` values: `explore`, `focus`. Additional useful parameters: `focus_target_name` (character name for character-focused sessions), `custom_focus_id`, `parent_session_id`.
+
+**Important: Omit None values from request body.** The API validates that `focus_target_name` must NOT be set when `guidance_mode='explore'`. The client should build the request body dynamically, excluding None fields:
+```python
+body = {"name": name, "guidance_mode": guidance_mode}
+if description is not None: body["description"] = description
+if template is not None: body["template"] = template
+if focus_target_name is not None: body["focus_target_name"] = focus_target_name
+```
 
 ### Navigator Configuration
 
@@ -136,7 +144,7 @@ class EnvironmentConfig:
 ENVIRONMENTS = {
     'staging': EnvironmentConfig(
         name='staging',
-        api_base_url='https://brainstormy-backend-staging.onrender.com',  # Verify URL
+        api_base_url='https://brainstormy-backend-staging.onrender.com',
         frontend_url='https://brainstormy-frontend-staging.onrender.com',
         auth_method='test_bypass',  # Test bypass recommended for staging too
     ),
@@ -168,7 +176,7 @@ class RetryConfig:
 
 @dataclass(frozen=True)
 class EvaluationConfig:
-    model: str = 'claude-sonnet-4-5-20250514'
+    model: str = 'claude-sonnet-4-5-20250929'
     max_tokens: int = 2048
     temperature: float = 0.0
 
@@ -210,7 +218,7 @@ SCREENSHOTS_DIR = os.path.join(SIMULATION_ROOT, 'screenshots')
 
 Implement all shared dataclasses from spec Part 2.2:
 
-- `SessionScript` — name, description, guidance_mode, template, focus_target_name, messages, expected_facts, screenshot_moments
+- `SessionScript` — name, guidance_mode, messages, expected_facts (required); description, template, focus_target_name, screenshot_moments (optional, all default to None/[])
 - `ChallengeQuery` — query, established_in_session, expected_facts, query_type
 - `DeliverableRequest` — type ('bible'/'report'), template_id, parameters, anchor_id, trigger_after_session
 - `GeneratedSessionOutline` — for tiers 50/100 (name, guidance_mode, template, topic, facts_to_establish, builds_on_sessions, message_count, writer_notes)
@@ -220,8 +228,7 @@ Implement all shared dataclasses from spec Part 2.2:
 - `RunMetrics` — all fields from spec Part 4.1
 
 **`StoryScenario.get_sessions_for_tier(tier)`:**
-- `tier <= 15`: return `self.sessions[:tier]`
-- `tier > 15`: return `self.sessions` (tiers 50/100 need LLM generation handled by runner)
+- Simply `return self.sessions[:tier]` for all tiers (matches spec). Tiers 50/100 will have more sessions added by the LLM generation step before this is called.
 
 **`RunMetrics` must include:**
 - Computed properties: `avg_response_time_ms`, `p95_response_time_ms`, `max_response_time_ms`, `duration_seconds`
@@ -266,17 +273,29 @@ Implement async HTTP client wrapping Brainstormy's REST API.
 **Constructor:**
 ```python
 class BrainstormyClient:
-    def __init__(self, base_url: str, auth_token: str | None = None,
+    def __init__(self, base_url: str, auth_headers: dict,
                  retry_config: RetryConfig | None = None, timeout: float = 300.0):
 ```
 
 **Context manager:** `async with BrainstormyClient(...) as client:` — creates/closes `httpx.AsyncClient`.
 
-**`from_config(config: SimulationConfig)` classmethod** — construct from config.
+**`from_config(config: SimulationConfig)` classmethod** — construct from config, building auth headers:
+```python
+@classmethod
+def from_config(cls, config: SimulationConfig) -> 'BrainstormyClient':
+    if config.test_user_id:
+        # Test bypass — no Authorization header needed
+        auth_headers = {"X-Test-User-ID": config.test_user_id}
+    elif config.clerk_session_token:
+        auth_headers = {"Authorization": f"Bearer {config.clerk_session_token}"}
+    else:
+        raise ValueError("No auth configured: need test_user_id or clerk_session_token")
+    return cls(config.environment.api_base_url, auth_headers, config.retry)
+```
 
 **Internal `_request(method, path, json, params)` method:**
 - Prepend `/api` to path
-- Include `Authorization: Bearer {token}` header if token provided
+- Include `self.auth_headers` on every request (set in constructor)
 - Retry on status codes in `retry_config.retryable_status_codes` with exponential backoff
 - Retry on `httpx.TimeoutException` and `httpx.ConnectError`
 - Log all requests: method, url, status code, elapsed ms (use `logging` module)
@@ -307,7 +326,7 @@ Implement all endpoint methods. Verified against actual backend code:
 | `end_session(session_id)` | POST | `/sessions/{id}/end` | Triggers async summary generation |
 | `delete_session(session_id)` | DELETE | `/sessions/{id}` | |
 | `send_message(session_id, content)` | POST | `/sessions/{id}/messages` | Returns user_message + assistant_message + citation_map synchronously |
-| `get_messages(session_id, limit=50)` | GET | `/sessions/{id}/messages` | For post-hoc analysis |
+| `get_messages(session_id, limit=50, offset=0)` | GET | `/sessions/{id}/messages` | limit: 1-200, offset available |
 | `generate_bible(story_id, template_id)` | POST | `/stories/{id}/bibles` | Field is **template_id** not template_key. Optional: character_anchors |
 | `get_bible(story_id, template_id)` | GET | `/stories/{id}/bibles/current?template_id=...` | **Query param**, not path segment |
 | `generate_report(story_id, report_type, parameters=None, anchor_id=None)` | POST | `/stories/{id}/reports` | Param `report_type` maps to API field `type` (avoids shadowing builtin). `parameters` required for `character_profile`: `{"character_name": "..."}` |
@@ -582,12 +601,12 @@ Run ID: fantasy_ember_15_20260214_143022_a1b2c3
 - Send on both success and failure (failure notification includes error summary)
 - Use raw `httpx` calls to Twilio REST API (matching `backend/services/whatsapp.py` pattern)
 
-**Validation:**
+**Validation (WhatsApp):**
 - [ ] Notification sends when Twilio credentials are configured
 - [ ] Runner completes normally when Twilio credentials are absent (no error)
 - [ ] Notification content includes scenario name, tier, status, scores, duration
 
-**Validation:**
+**Validation (CLI):**
 - [ ] `--list` shows registered scenarios
 - [ ] `--dry-run` prints readable execution plan
 - [ ] `--scenario fantasy_ember --tier 15` parses correctly
@@ -648,9 +667,7 @@ FANTASY_EMBER_PLACEHOLDER = StoryScenario(
     sessions=[
         SessionScript(
             name='Initial Premise Brainstorm',
-            description='Exploring the core concept and world',
             guidance_mode='explore',
-            template=None,
             messages=[
                 "I've been thinking about this concept — what if magic is dying? ...",
                 "Yeah, I think the world should feel like it's in this twilight period...",
@@ -661,6 +678,7 @@ FANTASY_EMBER_PLACEHOLDER = StoryScenario(
                 'Protagonist is a young woman artificer',
                 'Magic is tied to ember lines in the land',
             ],
+            description='Exploring the core concept and world',
             screenshot_moments=['after_session'],
         ),
     ],
