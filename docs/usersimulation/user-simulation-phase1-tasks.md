@@ -189,6 +189,10 @@ class SimulationConfig:
     test_user_id: str | None              # From BRAINSTORMY_SIM_USER_ID env var (test bypass)
     clerk_session_token: str | None       # From BRAINSTORMY_SIM_AUTH_TOKEN env var (Clerk fallback)
     anthropic_api_key: str | None         # From ANTHROPIC_API_KEY env var
+    twilio_account_sid: str | None = None  # Optional — for WhatsApp notifications
+    twilio_auth_token: str | None = None
+    twilio_whatsapp_from: str | None = None
+    whatsapp_notify_numbers: str | None = None
     capture_screenshots: bool = True
     cleanup_after_run: bool = False
     dry_run: bool = False
@@ -351,7 +355,7 @@ async def wait_for_summary(self, session_id: str,
 - Poll `get_session_status(session_id)` checking `has_summary` field (NOT `get_session()` — that endpoint doesn't return `has_summary`)
 - Exponential backoff: start at `poll_interval`, multiply by 1.5 each iteration, cap at `max_interval`
 - On timeout: raise `TimeoutError` (caller decides how to handle)
-- Return the session dict once summary is ready
+- Return the status dict once summary is ready (SessionStatusResponse, not SessionResponse)
 
 ### Task 1.2.4: `preflight_check()` Method
 
@@ -409,7 +413,7 @@ class MetricsCollector:
 | `record_error(operation, error)` | Store error details |
 | `record_timeout()` | Increment timeout counter |
 | `set_resource_ids(project_id, story_id)` | Store created resource IDs |
-| `compile(retention_results, citation_results) → RunMetrics` | Aggregate everything |
+| `compile(retention_results, citation_results=None) → RunMetrics` | Aggregate everything; citation_results=None sets all citation metrics to 0.0 |
 
 **`timed()` details:**
 - Wraps any async function with `time.monotonic()` timing
@@ -501,10 +505,12 @@ class SimulationRunner:
    - For each challenge query, create a **separate** dedicated session: `[Recall Test] {query.query_type}`
    - Send the query as a message, record AI response
    - End session (no need to wait for summary — not measured)
-   - Return list of `RetentionResult` (placeholder scores — Phase 2 evaluators will properly score these)
+   - Return list of `RetentionResult` with placeholder values: `score=0.0, facts_present=[], facts_missing=query.expected_facts, contradictions=[], raw_evaluation="Phase 1 placeholder — not evaluated"`
    - One session per query prevents earlier answers from contaminating later queries
 
-5. **Compile** — `metrics.compile(retention_results)` and return
+5. **Compile** — `metrics.compile(retention_results)` and return (citation_results=None for Phase 1)
+
+**Note on `trigger_after_session`:** Phase 1 generates ALL deliverables after ALL sessions, ignoring `DeliverableRequest.trigger_after_session`. This is fine for the placeholder scenario (which uses -1 = end). Phase 2 must implement mid-run deliverable generation when adding the full 15-session scenarios — deliverables with `trigger_after_session=10` should run after session 10, not deferred to end.
 
 **Error handling philosophy:** Individual message/session failures should be recorded in metrics but NOT abort the run. The runner should be resilient — if session 7 fails, continue with session 8.
 
