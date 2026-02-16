@@ -92,19 +92,35 @@ For each session, the agent runs a message loop:
 
 ```
 1. Create session via API → Brainstormy auto-generates an opening message
-2. Agent reads Brainstormy's opening message
-3. Agent generates first message as a response to the opening
-4. Send to Brainstormy API → receive AI response
-5. Agent reads AI response
-6. Agent decides: continue thread, redirect, push back, go deeper, or wrap up
-7. Agent generates next message informed by AI response
-8. Repeat 4-7 until session message target reached (or agent signals done)
-9. End session, wait for summary
+2. Call get_messages(session_id) to retrieve the opening message content
+3. Agent reads Brainstormy’s opening message
+4. Agent generates first message as a response to the opening
+5. Send to Brainstormy API → receive AI response
+6. Agent reads AI response
+7. Agent decides: continue thread, redirect, push back, go deeper, or wrap up
+8. Agent generates next message informed by AI response
+9. Repeat 5-8 until session message target reached (or agent signals done)
+10. End session, wait for summary
 ```
 
-**Note:** Brainstormy auto-generates an opening AI message when a session is created (except for logline sessions, which skip this). This means the first message in every session is from Brainstormy, not the user. The agent's first action is always to *read and respond to* Brainstormy's opening, which is how real users experience the product.
+**Opening message note:** `create_session()` returns the session object, *not* the opening message. The runner must call `get_messages(session_id)` after creation to retrieve the auto-generated AI opening. Logline sessions skip opening message generation — the agent sends the first message unprompted.
 
-The critical difference from scripted simulation: **step 6**. The agent's next message depends on what Brainstormy said. If Brainstormy suggests something interesting, the agent might pursue it. If Brainstormy contradicts an earlier decision, the agent might call it out. If Brainstormy gives a generic response, the agent might push for specifics.
+The critical difference from scripted simulation: **step 7**. The agent’s next message depends on what Brainstormy said. If Brainstormy suggests something interesting, the agent might pursue it. If Brainstormy contradicts an earlier decision, the agent might call it out. If Brainstormy gives a generic response, the agent might push for specifics.
+
+### 1.2.1 Error Recovery
+
+The conversation loop must handle failures without losing agent state:
+
+| Error | Strategy | Notes |
+|---|---|---|
+| `send_message()` returns 500 | Retry with backoff (max 3), re-use same agent message | Same pattern as scripted runner |
+| Agent LLM returns malformed JSON | Retry with simplified prompt; if still fails, extract `message` via regex, log parse error | Never send unparseable output to Brainstormy |
+| Brainstormy response empty/truncated | Agent treats as low-quality response and pushes for specifics | Persona-appropriate: plotter asks bluntly, beginner asks hesitantly |
+| Rate limiting (429) | Exponential backoff, respect Retry-After header | Applies to both Brainstormy and Anthropic APIs |
+| Session creation fails | Skip session, log gap, continue to next | Progression engine adjusts plan |
+| Session-level unrecoverable error | End session, continue to next, note gap in metrics | `metrics.json` includes `sessions_with_errors` count |
+
+**Principle:** Agent state persists across retries. A retried message uses the same agent state snapshot. If a session fails entirely, the agent carries its accumulated story state to the next session.
 
 ### 1.3 Repository Location
 
@@ -141,6 +157,186 @@ tests/simulation/results/{run_id}/
 ├── session_plans.json        # Budget: planned vs actual. Journey: graduation log
 └── journey_report.json       # Journey mode only: deliverable coherence analysis
 ```
+
+### 1.4.1 Output File Schemas
+
+**transcript.json:**
+
+```json
+{
+    "run_id": "reactive_budget_fantasy_verbose_20260215_160000",
+    "sessions": [
+        {
+            "session_index": 0,
+            "session_id": "uuid",
+            "session_name": "Verbose Explorer — Explore 1: Initial Brainstorm",
+            "guidance_mode": "explore",
+            "template": "open",
+            "phase": "explore",
+            "messages": [
+                {
+                    "index": 0,
+                    "role": "assistant",
+                    "content": "Welcome! Let’s explore your story idea...",
+                    "timestamp": "2026-02-15T16:00:05Z",
+                    "is_opening": true
+                },
+                {
+                    "index": 1,
+                    "role": "user",
+                    "content": "So I’ve been thinking about this character...",
+                    "timestamp": "2026-02-15T16:00:12Z",
+                    "agent_reasoning": "Opening with character seed. Targeting f001 (protagonist name).",
+                    "agent_decision": "continue",
+                    "facts_targeted": ["f001"],
+                    "facts_established": ["f001"]
+                },
+                {
+                    "index": 2,
+                    "role": "assistant",
+                    "content": "That’s a fascinating starting point! A retired detective...",
+                    "timestamp": "2026-02-15T16:00:28Z"
+                }
+            ],
+            "summary_available": true,
+            "summary_text": "Session explored the protagonist concept..."
+        }
+    ],
+    "errors": [
+        {
+            "session_index": 3,
+            "message_index": 2,
+            "error_type": "agent_parse_error",
+            "detail": "Malformed JSON from agent LLM, used regex fallback",
+            "recovered": true
+        }
+    ]
+}
+```
+
+**fact_ledger.json:**
+
+```json
+{
+    "run_id": "reactive_budget_fantasy_verbose_20260215_160000",
+    "mode": "budget",
+    "planned_facts": [
+        {
+            "fact_id": "f001",
+            "value": "Protagonist is named Elena",
+            "category": "character",
+            "priority": "core",
+            "flexible": false,
+            "target_session": 1,
+            "status": "established",
+            "established_in_session": 0,
+            "established_at_message": 1,
+            "source": "agent",
+            "modifications": []
+        },
+        {
+            "fact_id": "f012",
+            "value": "Magic costs physical pain",
+            "category": "world",
+            "priority": "core",
+            "flexible": true,
+            "target_session": 3,
+            "status": "modified",
+            "established_in_session": 3,
+            "established_at_message": 4,
+            "source": "agent",
+            "modifications": [
+                {
+                    "session": 6,
+                    "message": 2,
+                    "old_value": "Magic costs physical pain",
+                    "new_value": "Magic costs memories — each spell erases something",
+                    "reason": "Brainstormy suggested memory cost; agent adopted it"
+                }
+            ]
+        }
+    ],
+    "emerged_facts": [
+        {
+            "fact_id": "e001",
+            "description": "Elena’s grandfather was also an engineer",
+            "category": "character",
+            "source": "brainstormy",
+            "established_in_session": 2,
+            "established_at_message": 3,
+            "current_value": "Elena’s grandfather was also an engineer",
+            "modified_in_sessions": []
+        }
+    ],
+    "summary": {
+        "planned_total": 30,
+        "planned_established": 26,
+        "planned_deferred": 2,
+        "planned_abandoned": 2,
+        "emerged_total": 18,
+        "direction_changes": 3
+    }
+}
+```
+
+**session_plans.json (budget mode):**
+
+```json
+{
+    "planned": [
+        {
+            "session_index": 0,
+            "name": "Initial Premise Brainstorm",
+            "guidance_mode": "explore",
+            "template": "open",
+            "target_facts": ["f001", "f002", "f003"],
+            "target_messages": 6
+        }
+    ],
+    "actual": [
+        {
+            "session_index": 0,
+            "name": "Verbose Explorer — Explore 1: Initial Premise Brainstorm",
+            "guidance_mode": "explore",
+            "template": "open",
+            "facts_targeted": ["f001", "f002", "f003"],
+            "facts_established": ["f001", "f003"],
+            "facts_deferred": ["f002"],
+            "actual_messages": 7,
+            "duration_seconds": 145
+        }
+    ]
+}
+```
+
+**session_plans.json (journey mode):**
+
+```json
+{
+    "graduation_log": [
+        {
+            "from_phase": "explore",
+            "to_phase": "develop",
+            "at_session": 4,
+            "signals": ["named_characters", "core_conflict_established"],
+            "agent_state_snapshot": "3 characters named, central conflict around memory theft, world has magic system"
+        }
+    ],
+    "sessions": [
+        {
+            "session_index": 0,
+            "phase": "explore",
+            "guidance_mode": "explore",
+            "template": "open",
+            "purpose": "Initial exploration from seed",
+            "actual_messages": 6,
+            "duration_seconds": 130
+        }
+    ]
+}
+```
+
+**journey_report.json:** Contains the `JourneyCoherenceScores` output (Part 6.4) plus the raw evaluator responses. Separate from `metrics.json` because it includes verbose reasoning useful for human review but not needed for dashboard display.
 
 ---
 
@@ -261,11 +457,20 @@ Auto-generated at run start based on genre and session count. An LLM creates a s
 | Messages per session | Range | min 2–15, max 3–20 | 4–8 | Dual slider |
 | Working method | Select | supportive, balanced, direct | `balanced` | Dropdown |
 
-**Working method note:** Working method is a *user-level* preference (stored in `users.settings` JSONB), not a per-story or per-session setting. It's configured via `PUT /api/users/me/preferences`, not a story endpoint. The runner must call this once at the start of each run. **Requires adding `set_working_method()` to `api_client.py`:**
+**Working method note:** Working method is a *user-level* preference, not per-story or per-session. The runner must call this once at the start of each run. **Requires adding `set_working_method()` to `api_client.py`.**
+
+**⚠️ UNVERIFIED — Must validate before implementation:**
+1. Does `PUT /api/users/me/preferences` exist? (Verify exact path — may need `/api` prefix)
+2. Does it accept `{"working_method": "balanced"}` in the body?
+3. Are `supportive`, `balanced`, `direct` the correct enum values?
+4. Is the storage location `users.settings` JSONB as assumed?
+
+Check `backend/api/users.py` and `backend/config/working_method.py` in the Brainstormy codebase. If the endpoint shape differs, update `api_client.py` accordingly. If working method is set through a different mechanism entirely, this section must be revised.
 
 ```python
+# Assumed shape — verify before implementation
 async def set_working_method(self, method: str) -> dict:
-    return await self._put('/users/me/preferences', json={'working_method': method})
+    return await self._put('/api/users/me/preferences', json={'working_method': method})
 ```
 
 **Budget mode only:**
@@ -287,18 +492,56 @@ async def set_working_method(self, method: str) -> dict:
 
 ### 3.1 Agent Architecture
 
-The agent is an LLM (Claude Sonnet) prompted to behave as a specific writer persona. It maintains conversation state and makes decisions about what to say next based on Brainstormy's responses. The agent works identically in both modes — the difference is what drives its session-level goals.
+The agent is an LLM (Claude Sonnet) prompted to behave as a specific writer persona. It maintains conversation state and makes decisions about what to say next based on Brainstormy’s responses. The agent works identically in both modes — the difference is what drives its session-level goals.
 
 The agent prompt includes mode-specific context injected into a `{mode_context}` section:
 
 - **Budget mode context:** Lists remaining facts to establish in this session, instructs the agent to weave them naturally into conversation.
-- **Journey mode context:** Describes the current creative phase (explore/develop/workshop), the seed idea, what's been decided so far, and encourages the agent to follow its curiosity while tracking readiness to advance.
+- **Journey mode context:** Describes the current creative phase (explore/develop/workshop), the seed idea, what’s been decided so far, and encourages the agent to follow its curiosity while tracking readiness to advance.
 
-### 3.2 Agent Decision Making
+### 3.2 Agent Response Format
 
-The agent doesn't just generate messages — it makes strategic decisions that mimic real writer behavior:
+Every agent LLM call returns structured JSON. This is the contract between the agent prompt and the state tracker:
 
-**Responding to suggestions:** When Brainstormy proposes something, the agent evaluates it against the persona's tendencies. A `pushback_frequency="often"` persona rejects ~40% of suggestions. An `anxious_beginner` accepts almost everything.
+```json
+{
+    "message": "The actual text to send to Brainstormy (in persona voice)",
+    "decision": "continue | redirect | pushback | go_deeper | wrap_up",
+    "facts_targeted": ["f003", "f007"],
+    "facts_established": ["f003"],
+    "facts_modified": [
+        {"fact_id": "f002", "old_value": "Elena is 25", "new_value": "Elena is 28"}
+    ],
+    "facts_emerged": [
+        {"description": "Elena’s grandfather was also an engineer", "source": "brainstormy"}
+    ],
+    "readiness_signals": ["named_characters", "core_conflict_established"],
+    "direction_change": null,
+    "reasoning": "Brainstormy suggested the grandfather angle — pursuing it because it deepens Elena’s motivation. Deferring f007 (magic cost) to next session, doesn’t fit the character thread."
+}
+```
+
+**Field definitions:**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `message` | string | Always | Text sent to Brainstormy. Must match persona voice/length. |
+| `decision` | enum | Always | Agent’s strategic choice for this turn. |
+| `facts_targeted` | string[] | Budget mode | Fact IDs the agent tried to establish this turn. |
+| `facts_established` | string[] | Both modes | Facts confirmed as stated in this message. |
+| `facts_modified` | object[] | Both modes | Previously established facts that changed. |
+| `facts_emerged` | object[] | Both modes | New facts from Brainstormy that the agent accepts. |
+| `readiness_signals` | string[] | Journey mode | Signals for phase graduation evaluation. |
+| `direction_change` | string│null | Both modes | Description if story direction changed. |
+| `reasoning` | string | Always | Internal thought process (logged to transcript, not sent to Brainstormy). |
+
+**Parsing resilience:** If the agent LLM returns malformed JSON, the runner attempts regex extraction of the `message` field. If that fails, a fallback generic continuation message is used (persona-appropriate: "Tell me more about that" for beginners, "Continue" for plotters). Parse errors are logged to the transcript with the raw output.
+
+### 3.3 Agent Decision Making
+
+The agent doesn’t just generate messages — it makes strategic decisions that mimic real writer behavior:
+
+**Responding to suggestions:** When Brainstormy proposes something, the agent evaluates it against the persona’s tendencies. A `pushback_frequency="often"` persona rejects ~40% of suggestions. An `anxious_beginner` accepts almost everything.
 
 **Pacing fact establishment (budget mode):** The session planner distributes facts across sessions. The agent finds natural moments to introduce them. Unfit facts get deferred to the next session.
 
@@ -308,11 +551,85 @@ The agent doesn't just generate messages — it makes strategic decisions that m
 
 **Session wrap-up:** As the agent approaches the target message count, it naturally converges — making final decisions, summarizing, and signaling readiness to move on.
 
-### 3.3 Agent State
+### 3.4 Context Management
 
-Tracks story decisions, open questions, rejected ideas, established facts (planned + emerged), conversation history, direction changes, and (journey mode) readiness signals and current phase. Full dataclass in implementation.
+Agent prompts grow as conversation state accumulates. Without management, a 15-session journey run could produce 50–100K tokens of context per agent call, degrading quality and inflating cost.
 
----
+**Strategy: Current session verbatim, prior sessions summarized.**
+
+```
+Agent prompt structure (per call):
+┌────────────────────────────────────────────────────┐
+│ FIXED: Persona definition + voice examples     │  ~1K tokens (never summarized)
+│ FIXED: Mode context + instructions               │  ~0.5K tokens
+├────────────────────────────────────────────────────┤
+│ ROLLING SUMMARY: Prior sessions (1 para each)  │  ~2K tokens for 10 sessions
+│ CURRENT FACTS: Active fact ledger (compact)     │  ~1K tokens for 40 facts
+│ OPEN QUESTIONS + REJECTED IDEAS (compact)       │  ~0.3K tokens
+├────────────────────────────────────────────────────┤
+│ VERBATIM: Current session messages              │  ~3K tokens (6 msg pairs)
+│ BRAINSTORMY’S LAST RESPONSE                     │  ~0.5K tokens
+├────────────────────────────────────────────────────┤
+│ TASK: Generate next message as JSON              │  ~0.3K tokens
+└────────────────────────────────────────────────────┘
+TOTAL: ~8–9K tokens per call (stable, not growing)
+```
+
+**Rules:**
+1. Persona voice description + example messages are **always included verbatim** in every call. Never summarize these away — this prevents persona drift (see 3.6).
+2. Prior sessions are summarized to one paragraph each after completion. The summary includes: session topic, key decisions made, facts established, and any direction changes.
+3. The current session’s messages are included verbatim (user + AI pairs).
+4. The fact ledger is included as a compact list: `[f001] Elena is 28, engineer (established session 1) [f002] Magic costs physical pain (modified session 4, was "costs energy")`.
+5. Open questions and rejected ideas are capped at 10 most recent.
+
+**Context budget ceiling:** 12K tokens per agent call. If the prompt exceeds this, the runner truncates prior session summaries (oldest first) until under budget. This ensures quality stays high even at 100-session scale.
+
+### 3.5 Agent State
+
+Tracks story decisions, open questions, rejected ideas, established facts (planned + emerged), conversation history, direction changes, and (journey mode) readiness signals and current phase.
+
+```python
+@dataclass
+class AgentState:
+    # Story state
+    story_decisions: list[StoryDecision]
+    open_questions: list[str]
+    rejected_ideas: list[str]
+    
+    # Fact tracking
+    facts_established: dict[str, FactStatus]   # fact_id → status
+    facts_emerged: list[EmergedFact]
+    facts_deferred: list[str]
+    
+    # Session summaries (for context management)
+    session_summaries: list[str]               # One paragraph per completed session
+    current_session_messages: list[tuple[str, str]]  # (role, content)
+    
+    # Direction changes
+    direction_changes: list[DirectionChange]
+    
+    # Journey mode
+    readiness_signals: list[ReadinessSignal]
+    current_phase: str                         # "explore" | "develop" | "workshop"
+    phase_transitions: list[PhaseTransition]
+    
+    # Error tracking
+    sessions_with_errors: int
+    parse_errors: int
+```
+
+### 3.6 Persona Drift Prevention
+
+LLM persona fidelity degrades over long runs, especially as prompt context grows. The following techniques maintain consistency:
+
+1. **Always re-inject persona anchors.** Every agent call includes `voice_description` and 2–3 `example_messages` verbatim. These are never summarized or removed, regardless of context budget pressure.
+
+2. **Lightweight drift detection.** Every 5 messages, a quick check compares the agent’s recent output against persona targets:
+   - Is message length within the persona’s `message_length` range?
+   - Does the message contain the persona’s characteristic patterns? (e.g., ellipses for verbose_explorer, craft terminology for efficient_plotter)
+   - If 2+ consecutive messages fail the check, the next prompt includes a corrective nudge: `"REMINDER: You are {persona_name}. Your messages should be {message_length}. Example of your voice: {example}"`
+
+3. **Post-run persona consistency score.** The Observer evaluates whether the agent maintained consistent voice across the full run. This is logged in transcript.json but not exposed as a primary metric (it measures the simulation’s quality, not Brainstormy’s).
 
 ## Part 4: Budget Mode — Session Planning and Fact Budget
 
@@ -395,6 +712,59 @@ The progression engine decides when to graduate between phases. This is **not** 
 | Explore | 2 | 50% of total | Must establish basic story material |
 | Develop | 2 | 40% of total | Must deepen at least 2 elements |
 | Workshop | 2 | 30% of total | Must attempt theme + logline at minimum |
+
+Note: These are independent ceilings (50% + 40% + 30% = 120%), not allocations. For a 10-session run the theoretical maximums are 5 + 4 + 3, but the forcing rules below ensure forward progress.
+
+**Forcing rules (prevent stalling):**
+
+| Rule | Condition | Action |
+|---|---|---|
+| Explore → Develop | Remaining sessions ≤ 50% of total AND still in Explore | Force graduation to Develop regardless of readiness signals |
+| Develop → Workshop | Remaining sessions ≤ 30% of total AND still in Develop | Force graduation to Workshop regardless of readiness signals |
+| Emergency Workshop | 2 sessions remaining AND not yet in Workshop | Skip directly to Workshop, start with workshop_theme |
+
+These forcing rules guarantee that every journey run reaches Workshop phase and has at least 2 sessions to produce deliverables.
+
+**Example: 10-session run forcing timeline:**
+```
+Sessions 1-5:  Explore allowed (max 50%)
+Session 6:     If still in Explore, FORCED to Develop (50% remaining)
+Sessions 6-8:  Develop allowed
+Session 8:     If still in Develop, FORCED to Workshop (30% remaining = 3 sessions)
+Sessions 8-10: Workshop phase (minimum 2 sessions guaranteed)
+```
+
+### 5.2.1 Journey Completion Signal
+
+The journey is complete when the ProgressionEngine evaluates these criteria:
+
+```python
+def is_journey_complete(self, agent_state: AgentState) -> bool:
+    """
+    Journey is complete when minimum workshop deliverables exist
+    AND either the agent signals satisfaction or sessions are exhausted.
+    """
+    required_deliverables = (
+        "workshop_theme" in self.used_unique_templates
+        and "logline" in self.used_unique_templates
+    )
+    
+    agent_done = any(
+        signal in agent_state.readiness_signals
+        for signal in ["journey_satisfied", "deliverables_complete", "ready_to_wrap"]
+    )
+    
+    sessions_exhausted = self.sessions_completed >= self.session_cap
+    
+    min_workshop_met = self.workshop_session_count >= 2
+    
+    return required_deliverables and min_workshop_met and (agent_done or sessions_exhausted)
+```
+
+**Completion states:**
+- `"full"` — Required deliverables produced AND agent signaled satisfaction
+- `"partial"` — Required deliverables produced but session cap reached before agent finished
+- `"stalled"` — Session cap reached without producing required deliverables (indicates forcing rules failed or run was too short)
 
 ### 5.3 Session Selection in Journey Mode
 
@@ -495,7 +865,81 @@ class ConversationalQualityScores:
     question_appropriateness: float    # 0-1, useful questions (not interrogative)?
 ```
 
-Each metric scored by LLM evaluator reviewing transcript sections with specific rubrics.
+### 6.3.1 Evaluation Methodology
+
+Each metric is scored by an LLM evaluator (Sonnet) reviewing transcript segments. The methodology varies by metric to balance accuracy against cost.
+
+**Tier 1 — Per-session evaluation (1 call per session):**
+
+These metrics are evaluated once per session, with scores averaged across sessions.
+
+| Metric | Evaluation Scope | Rubric Summary |
+|---|---|---|
+| `within_session_coherence` | Full session transcript | 1.0 = Zero contradictions within the session. 0.5 = Minor inconsistencies (e.g., vague reference to earlier detail). 0.0 = Direct contradictions (states opposite of earlier claim). |
+| `direction_follow_rate` | Full session transcript | Evaluator identifies all user redirections ("actually, let’s..." / "no, I meant..." / topic changes). Score = fraction where Brainstormy followed the redirect within 1 response. |
+| `style_matching` | Full session transcript + persona definition | 1.0 = Response length and vocabulary consistently match persona’s expertise level. 0.5 = Occasional mismatch (too technical for beginner, too simple for experienced). 0.0 = Persistent mismatch. |
+| `question_appropriateness` | Full session transcript | Evaluator identifies all questions Brainstormy asked. Score = fraction that were productive (advanced the story) vs. interrogative (felt like an interview). |
+
+**Expected calls:** Sessions × 4 metrics = 10 sessions × 4 = 40 calls for budget mode. These can be batched into a single call per session evaluating all 4 metrics at once, reducing to **10 calls** for budget mode, **15 calls** for journey mode.
+
+**Tier 2 — Cross-session evaluation (1–3 calls total):**
+
+These metrics require viewing patterns across the full run.
+
+| Metric | Evaluation Scope | Rubric Summary |
+|---|---|---|
+| `cross_session_coherence` | Session summaries + fact ledger | 1.0 = Facts from early sessions are accurately referenced in later sessions. 0.5 = Some facts drift or become vague. 0.0 = Clear contradictions across sessions. Evaluator receives fact ledger + session summaries (not full transcripts). |
+| `self_reference_rate` | Sampled Brainstormy responses (10–15) | Evaluator checks whether Brainstormy references its own earlier suggestions. Score = fraction of sampled responses that build on prior AI content vs. generating de novo. |
+
+**Expected calls:** 2–3 total.
+
+**Tier 3 — Event-triggered evaluation:**
+
+These metrics are evaluated only when the relevant event occurs.
+
+| Metric | Evaluation Scope | Rubric Summary |
+|---|---|---|
+| `pushback_handling` | Agent transcript filtered to pushback moments only | Evaluator receives only the message pairs where the agent pushed back. 1.0 = Brainstormy acknowledged the pushback, adapted, and offered alternatives. 0.5 = Acknowledged but didn’t meaningfully change direction. 0.0 = Ignored pushback or repeated the rejected suggestion. Score = average across pushback events. |
+| `suggestion_quality` | Sampled Brainstormy suggestions (10–15) | Evaluator receives the suggestion in context (prior 2–3 messages). 1.0 = Genre-appropriate, specific, builds on established story. 0.5 = Relevant but generic. 0.0 = Off-genre, contradicts established decisions, or adds nothing. |
+
+**Expected calls:** 2–4 total (depends on pushback count).
+
+**Evaluation prompt template:**
+
+```
+You are evaluating Brainstormy, an AI brainstorming partner for fiction writers.
+Review the following transcript segment and score the specified metric.
+
+METRIC: {metric_name}
+RUBRIC: {rubric_text}
+
+CONTEXT:
+- Genre: {genre}
+- Writer persona: {persona_description}
+- Session type: {session_type}
+- Facts established so far: {fact_summary}  (for cross-session metrics only)
+
+TRANSCRIPT:
+{transcript_segment}
+
+Score 0.0 to 1.0. Provide:
+1. The score
+2. 1-2 sentence justification
+3. Specific examples from the transcript supporting your score
+
+Respond as JSON:
+{
+    "score": 0.85,
+    "justification": "...",
+    "evidence": ["message 3: Brainstormy correctly tracked the name change", "..."]
+}
+```
+
+**Total evaluator calls per run:**
+- Budget mode (10 sessions): ~14–17 calls
+- Journey mode (15 sessions): ~20–25 calls
+
+These are reflected in the revised cost estimates (Part 8).
 
 ### 6.4 Journey Mode: Deliverable Coherence Analysis
 
@@ -624,39 +1068,100 @@ The runner handles both modes through a shared core with mode-specific controlle
 
 **Project creation note:** Projects must be created with `is_series=True` to avoid auto-creation side effects. When `is_series=False` (default), the backend automatically creates an implicit story and a first session, which conflicts with the runner's explicit setup flow. The existing scripted runner uses the same pattern.
 
+### 7.2 Session Naming Convention
+
+Good session names matter for debugging, summary quality (Brainstormy uses the name in its summary prompt), and human review of completed projects.
+
+**Budget mode:** `"{persona_name} — Session {n}: {template_description}"`
+- Examples: "Verbose Explorer — Session 1: Open Exploration", "Verbose Explorer — Session 5: Character Focus (Elena)"
+
+**Journey mode:** `"{persona_name} — {phase} {n}: {session_purpose}"`
+- Examples: "Verbose Explorer — Explore 1: Initial Brainstorm", "Verbose Explorer — Develop 3: World Rules", "Verbose Explorer — Workshop 1: Theme Synthesis"
+
+The session purpose in journey mode is generated by the ProgressionEngine when it suggests the next session. It’s a short phrase describing why this session exists (e.g., "Character Focus (Elena)" or "Theme Synthesis").
+
 Both modes share the `_run_reactive_session()` method — the per-session conversation loop is identical.
 
 ---
 
 ## Part 8: Cost Estimation
 
+### Context-Adjusted Cost Model
+
+Agent calls are *not* uniform cost. Early calls (~2K tokens prompt) cost much less than late-session calls with accumulated state (~8–9K tokens with context management from Part 3.4). Post-run Observer calls reviewing full transcripts are the most expensive individual calls.
+
 ### Budget Mode (10-session run)
 
-| Component | LLM Calls | Est. Cost |
-|---|---|---|
-| Fact budget + session planning | 2 | ~$0.04 |
-| Agent messages (10 × 6 avg) | 60 | ~$0.60 |
-| Post-run analysis + challenge eval | ~27 | ~$0.30 |
-| **Total** | **~89** | **~$0.94** |
+| Component | LLM Calls | Avg Tokens/Call | Est. Cost |
+|---|---|---|---|
+| Fact budget + session planning | 2 | ~2K | ~$0.04 |
+| Agent messages (10 × 6 avg) | 60 | ~5K avg (grows 2K→9K) | ~$1.20 |
+| Per-session quality evaluation | ~10 | ~8K (full session transcript) | ~$0.40 |
+| Cross-session + event evaluators | ~5 | ~6K | ~$0.15 |
+| Challenge query generation + eval | ~16 | ~4K | ~$0.30 |
+| Post-run Observer analysis | 2 | ~15K (full transcript review) | ~$0.15 |
+| **Total** | **~95** | | **~$2.25** |
 
 ### Journey Mode (15-session run)
 
-| Component | LLM Calls | Est. Cost |
-|---|---|---|
-| Agent messages (15 × 6 avg) | 90 | ~$0.90 |
-| Progression decisions | ~15 | ~$0.08 |
-| Post-run analysis + challenge + coherence eval | ~37 | ~$0.45 |
-| **Total** | **~142** | **~$1.43** |
+| Component | LLM Calls | Avg Tokens/Call | Est. Cost |
+|---|---|---|---|
+| Agent messages (15 × 6 avg) | 90 | ~6K avg (grows 2K→9K) | ~$2.20 |
+| Progression decisions | ~15 | ~4K | ~$0.30 |
+| Per-session quality evaluation | ~15 | ~8K | ~$0.60 |
+| Cross-session + event evaluators | ~7 | ~6K | ~$0.20 |
+| Challenge query generation + eval | ~21 | ~4K | ~$0.40 |
+| Journey coherence evaluation | 2 | ~20K (deliverables + transcript) | ~$0.20 |
+| Post-run Observer analysis | 2 | ~20K | ~$0.20 |
+| **Total** | **~152** | | **~$4.10** |
 
-Under $2 for a comprehensive 15-session journey test. Brainstormy's OpenRouter costs are separate.
+**Sonnet vs. Opus:** All estimates assume Claude Sonnet. If journey mode graduation logic or persona maintenance requires Opus, costs scale 5–10x. Start with Sonnet; upgrade selectively if quality is poor.
 
-**Cost model note:** These estimates assume Claude Sonnet for all agent LLM calls. If journey mode graduation logic or persona maintenance requires Opus for better reasoning, costs scale 5–10x (a 15-session journey run would be ~$7–15). Start with Sonnet; upgrade selectively if persona drift or graduation quality is poor.
+**Cost tracking:** The runner must log actual token usage per LLM call (both agent and evaluator). This data feeds into the dashboard for cost monitoring and helps calibrate future estimates. Stored in `metrics.json` under `cost_tracking`:
+
+```json
+"cost_tracking": {
+    "agent_calls": 90,
+    "agent_total_input_tokens": 540000,
+    "agent_total_output_tokens": 27000,
+    "evaluator_calls": 24,
+    "evaluator_total_input_tokens": 192000,
+    "evaluator_total_output_tokens": 4800,
+    "estimated_total_cost_usd": 4.10
+}
+```
 
 ### Known Issue: Summary Timeouts on Staging
 
-Session summaries on staging consistently exceed the 300-second poll timeout (observed during scripted simulation Phase 2 runs). Summaries *are* generated but take longer than the runner's poll window. This affects both scripted and reactive simulation.
+Session summaries on staging consistently exceed the 300-second poll timeout (observed during scripted simulation Phase 2 runs). Summaries *are* generated but take longer than the runner’s poll window. This affects both scripted and reactive simulation.
 
-**Impact:** The runner proceeds without summary confirmation. The Observer cannot use summary content for quality analysis until summaries complete. **Mitigation:** Add a post-run step that re-fetches all session summaries after the full run completes, before the Observer begins analysis. Summaries should be available by then given the total run duration.
+**Post-run summary re-fetch strategy:**
+
+1. During the run, `wait_for_summary()` uses existing timeout (300s). If it times out, log the gap and continue.
+2. After all sessions complete, wait a configurable **grace period** (default: 10 minutes). This allows Brainstormy’s background workers to finish processing.
+3. Batch-fetch all session summaries via `get_summary(session_id)` for each session.
+4. For any still missing: proceed without them. The Observer uses available summaries and flags gaps.
+5. Metrics include `summaries_available: int` and `summaries_missing: int` counts.
+
+```python
+async def post_run_summary_fetch(
+    self,
+    session_ids: list[str],
+    grace_period_seconds: int = 600,  # 10 minutes default
+) -> dict[str, str | None]:
+    """Batch-fetch summaries after run completes."""
+    await asyncio.sleep(grace_period_seconds)
+    
+    summaries = {}
+    for sid in session_ids:
+        try:
+            summary = await self.client.get_summary(sid)
+            summaries[sid] = summary.get("content")
+        except Exception:
+            summaries[sid] = None  # Flag as missing
+    
+    return summaries
+```
 
 ---
 
@@ -697,7 +1202,7 @@ Session summaries on staging consistently exceed the 300-second poll timeout (ob
 | 4.1 | 2h | Observer: emerged fact extraction + challenge generation |
 | 4.2 | 2h | Conversational quality evaluators (both modes) |
 | 4.3 | 2h | Journey coherence evaluator (deliverable analysis) |
-| 4.4 | 1h | Metrics compilation into standard metrics.json (extend `MetricsCollector.compile()` or create `ReactiveMetricsCollector` subclass to accept `conversational_quality`, `journey_coherence`, `facts`, `phases` alongside existing `retention_results` and `citation_results`) |
+| 4.4 | 2h | `ReactiveMetricsCollector(MetricsCollector)` subclass producing `ReactiveRunMetrics(RunMetrics)` with additional fields: `conversational_quality`, `journey_coherence`, `facts`, `phases`, `cost_tracking`. The subclass approach keeps the existing scripted pipeline untouched while extending for reactive. The quality pipeline must detect `simulation_type` field to determine which schema variant it received. |
 
 ### Phase 5: Runner and Integration (4–5 hours)
 
@@ -716,7 +1221,7 @@ Session summaries on staging consistently exceed the 300-second poll timeout (ob
 | 6.2 | 1h | Run 2 journey mode simulations with different seeds |
 | 6.3 | 1h | Tune prompts, verify pipeline compatibility |
 
-### Total: 30–40 hours
+### Total: 32–43 hours
 
 ---
 
@@ -748,9 +1253,18 @@ Session summaries on staging consistently exceed the 300-second poll timeout (ob
 - [ ] Human reviewer rates project as "plausible" or better
 
 ### Compatibility
-- [ ] Same evaluators work for scripted, budget, and journey metrics
-- [ ] Quality pipeline consumes all metrics.json variants without modification
+- [ ] Same retention and citation evaluators work for scripted, budget, and journey metrics
+- [ ] `metrics.json` includes `simulation_type` discriminator field (`"scripted"`, `"reactive"`) and `simulation_mode` (`"budget"`, `"journey"`) for schema detection
+- [ ] `ReactiveRunMetrics` extends `RunMetrics` — all scripted fields present, reactive fields additive
 - [ ] Results displayable on future unified dashboard
+
+**Pipeline integration note:** The claim that the quality pipeline consumes reactive metrics "without modification" is incorrect. The pipeline will need a separate integration task to:
+1. Detect `simulation_type: "reactive"` and handle the extended schema
+2. Accept optional keys (`conversational_quality`, `journey_coherence`, `phases`) that don’t exist in scripted runs
+3. Route reactive-specific metrics to appropriate dashboard panels
+4. Handle the `cost_tracking` field for cost monitoring
+
+This is a bounded extension (not a rewrite) estimated at 2–4 hours, but should be tracked as a separate task, not assumed to be zero-effort.
 
 ---
 
