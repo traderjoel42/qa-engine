@@ -91,16 +91,20 @@ The reactive simulation should be **configurable enough to cover the usage patte
 For each session, the agent runs a message loop:
 
 ```
-1. Agent generates opening message based on session goal
-2. Send to Brainstormy API → receive AI response
-3. Agent reads AI response
-4. Agent decides: continue thread, redirect, push back, go deeper, or wrap up
-5. Agent generates next message informed by AI response
-6. Repeat 2-5 until session message target reached (or agent signals done)
-7. End session, wait for summary
+1. Create session via API → Brainstormy auto-generates an opening message
+2. Agent reads Brainstormy's opening message
+3. Agent generates first message as a response to the opening
+4. Send to Brainstormy API → receive AI response
+5. Agent reads AI response
+6. Agent decides: continue thread, redirect, push back, go deeper, or wrap up
+7. Agent generates next message informed by AI response
+8. Repeat 4-7 until session message target reached (or agent signals done)
+9. End session, wait for summary
 ```
 
-The critical difference from scripted simulation: **step 4**. The agent's next message depends on what Brainstormy said. If Brainstormy suggests something interesting, the agent might pursue it. If Brainstormy contradicts an earlier decision, the agent might call it out. If Brainstormy gives a generic response, the agent might push for specifics.
+**Note:** Brainstormy auto-generates an opening AI message when a session is created (except for logline sessions, which skip this). This means the first message in every session is from Brainstormy, not the user. The agent's first action is always to *read and respond to* Brainstormy's opening, which is how real users experience the product.
+
+The critical difference from scripted simulation: **step 6**. The agent's next message depends on what Brainstormy said. If Brainstormy suggests something interesting, the agent might pursue it. If Brainstormy contradicts an earlier decision, the agent might call it out. If Brainstormy gives a generic response, the agent might push for specifics.
 
 ### 1.3 Repository Location
 
@@ -257,6 +261,13 @@ Auto-generated at run start based on genre and session count. An LLM creates a s
 | Messages per session | Range | min 2–15, max 3–20 | 4–8 | Dual slider |
 | Working method | Select | supportive, balanced, direct | `balanced` | Dropdown |
 
+**Working method note:** Working method is a *user-level* preference (stored in `users.settings` JSONB), not a per-story or per-session setting. It's configured via `PUT /api/users/me/preferences`, not a story endpoint. The runner must call this once at the start of each run. **Requires adding `set_working_method()` to `api_client.py`:**
+
+```python
+async def set_working_method(self, method: str) -> dict:
+    return await self._put('/users/me/preferences', json={'working_method': method})
+```
+
 **Budget mode only:**
 
 | Parameter | Type | Options | Default | Dashboard Control |
@@ -320,6 +331,8 @@ Sessions 10+:  Deeper focus sessions, refinement
 ```
 
 Genre shapes template distribution. Fantasy skews world-building. Mystery skews plot. Romance skews character.
+
+**Explore template note:** Budget mode explore sessions default to `template="open"`, but the `problem` template is available for variety. The session planner may use `template="problem"` for mid-run explore sessions where the agent is working through a specific story problem (e.g., "how do I resolve this plot hole?") rather than open-ended brainstorming.
 
 ### 4.3 Fact Distribution
 
@@ -385,20 +398,48 @@ The progression engine decides when to graduate between phases. This is **not** 
 
 ### 5.3 Session Selection in Journey Mode
 
-**Explore phase:** Always `guidance_mode="explore"`. Topics derived from seed + conversation flow.
+**Complete template reference:**
+
+| Mode | Templates | Notes |
+|---|---|---|
+| Explore | `open` (default), `problem` | `problem` is for problem-focused exploration |
+| Focus | `character`, `plot`, `scene`, `world`, `logline`, `dialogue`, `outline_section`, `custom` | `custom` references user-created focus areas |
+| Workshop | `workshop_theme`, `workshop_act`, `workshop_sequence`, `workshop_scene`, `workshop_beat`, `workshop_structure` | `workshop_structure` is the unified template combining the granular hierarchy (`act` → `sequence` → `scene` → `beat`) |
+
+The reactive simulation uses a subset in v1. Journey mode uses `workshop_structure` for synthesis rather than the granular hierarchy — the granular templates (`workshop_act`, etc.) are available for future enhancement. The `custom` template is also excluded from v1 since it depends on user-created focus areas.
+
+**Explore phase:** `guidance_mode="explore"`, defaults to `template="open"`. The `problem` template is available for problem-focused exploration but not used in v1 journey mode (available for budget mode variety — see Part 4). Topics derived from seed + conversation flow.
 
 **Develop phase:** `guidance_mode="focus"` with template selected by need:
-- Undeveloped characters → `template="character"`, `focus_target_name="<name>"`
+- Undeveloped characters → `template="character"`, `focus_target_name="<n>"`
 - Unclear world rules → `template="world"`
 - Loose plot structure → `template="plot"`
 - Key scenes identified → `template="scene"`
+- Dialogue voice exploration → `template="dialogue"`
 
 **Workshop phase:** `guidance_mode="focus"` with workshop templates:
 - First → `template="workshop_theme"`
 - After theme → `template="logline"`
 - After logline → `template="workshop_structure"` or `template="outline_section"`
 
-The agent's session-opening message reflects transitions naturally. A real writer might say: "Okay, I feel like I have a solid handle on the characters and the world. Let me try to figure out what this story is actually *about*."
+**Uniqueness constraints:** The backend enforces **one `logline` session and one `workshop_theme` session per story**. Creating a duplicate returns an error. The `ProgressionEngine` must track which unique templates have been used and never attempt to create a second one:
+
+```python
+class ProgressionEngine:
+    def __init__(self, session_cap: int):
+        ...
+        self.used_unique_templates: set[str] = set()  # tracks "logline", "workshop_theme"
+    
+    def suggest_next_session(self, agent_state, current_phase) -> SessionSpec:
+        ...
+        # Never suggest a unique template that's already been created
+        if candidate_template in ("logline", "workshop_theme"):
+            if candidate_template in self.used_unique_templates:
+                # Skip to next workshop step
+                ...
+```
+
+The agent’s session-opening message reflects transitions naturally. A real writer might say: “Okay, I feel like I have a solid handle on the characters and the world. Let me try to figure out what this story is actually *about*.”
 
 ### 5.4 Emerged Fact Tracking
 
@@ -567,19 +608,21 @@ The runner handles both modes through a shared core with mode-specific controlle
 
 **Budget mode flow:**
 1. Generate fact budget and session plan
-2. Create project and story, configure Navigator
+2. Create project (`is_series=True`), explicitly create story, configure Navigator, set working method
 3. Initialize agent with fact budget
 4. Run sessions per plan (agent reacts to Brainstormy within each)
 5. Post-run observation → challenge queries → retention evaluation
 6. Compile and save metrics
 
 **Journey mode flow:**
-1. Create project and story, configure Navigator
+1. Create project (`is_series=True`), explicitly create story, configure Navigator, set working method
 2. Initialize agent with seed
 3. Loop: progression engine evaluates readiness → suggests next session → agent runs it
 4. Loop ends when journey complete or session cap reached
 5. Post-run observation → challenge queries → retention + coherence evaluation
 6. Compile and save metrics (including journey coherence)
+
+**Project creation note:** Projects must be created with `is_series=True` to avoid auto-creation side effects. When `is_series=False` (default), the backend automatically creates an implicit story and a first session, which conflicts with the runner's explicit setup flow. The existing scripted runner uses the same pattern.
 
 Both modes share the `_run_reactive_session()` method — the per-session conversation loop is identical.
 
@@ -606,6 +649,14 @@ Both modes share the `_run_reactive_session()` method — the per-session conver
 | **Total** | **~142** | **~$1.43** |
 
 Under $2 for a comprehensive 15-session journey test. Brainstormy's OpenRouter costs are separate.
+
+**Cost model note:** These estimates assume Claude Sonnet for all agent LLM calls. If journey mode graduation logic or persona maintenance requires Opus for better reasoning, costs scale 5–10x (a 15-session journey run would be ~$7–15). Start with Sonnet; upgrade selectively if persona drift or graduation quality is poor.
+
+### Known Issue: Summary Timeouts on Staging
+
+Session summaries on staging consistently exceed the 300-second poll timeout (observed during scripted simulation Phase 2 runs). Summaries *are* generated but take longer than the runner's poll window. This affects both scripted and reactive simulation.
+
+**Impact:** The runner proceeds without summary confirmation. The Observer cannot use summary content for quality analysis until summaries complete. **Mitigation:** Add a post-run step that re-fetches all session summaries after the full run completes, before the Observer begins analysis. Summaries should be available by then given the total run duration.
 
 ---
 
@@ -646,7 +697,7 @@ Under $2 for a comprehensive 15-session journey test. Brainstormy's OpenRouter c
 | 4.1 | 2h | Observer: emerged fact extraction + challenge generation |
 | 4.2 | 2h | Conversational quality evaluators (both modes) |
 | 4.3 | 2h | Journey coherence evaluator (deliverable analysis) |
-| 4.4 | 1h | Metrics compilation into standard metrics.json |
+| 4.4 | 1h | Metrics compilation into standard metrics.json (extend `MetricsCollector.compile()` or create `ReactiveMetricsCollector` subclass to accept `conversational_quality`, `journey_coherence`, `facts`, `phases` alongside existing `retention_results` and `citation_results`) |
 
 ### Phase 5: Runner and Integration (4–5 hours)
 
@@ -744,12 +795,20 @@ High-value combinations for novel development testing:
 | Literary | "the stories we tell ourselves" | "a translator losing their first language" | "three siblings return to sell their childhood home" | "quiet devastation, precise prose" |
 | Horror | "what lurks in routine" | "a night shift nurse at a hospital that shouldn't exist" | "a neighborhood where everyone's basements connect" | "creeping suburban dread" |
 
-### D. Future Enhancements
+### D. Unused Session Parameters (Future Phases)
+
+The session creation API supports two additional parameters not used in v1 reactive simulation:
+
+- **`custom_focus_id`** — References user-created custom focus areas (`074_custom_focus_areas.sql`). Would allow testing of user-defined focus templates.
+- **`parent_session_id`** — For sessions spawned from logline workshops. Required for session branching (enhancement #2 below).
+
+### E. Future Enhancements
 
 1. **Multi-story runs:** Agent creates multiple stories within one project, testing project-level memory
-2. **Session branching:** Agent deliberately tests Brainstormy's branching features
+2. **Session branching:** Agent deliberately tests Brainstormy's branching features (leverages `parent_session_id` parameter)
 3. **Adversarial mode:** Rapid topic changes, contradictions, extremely long messages — find breaking points
 4. **Persona learning:** Analyze lowest-scoring persona/genre combos, auto-generate variants targeting weaknesses
 5. **A/B testing mode:** Same persona/genre with different Brainstormy configs, compare metrics
 6. **Journey replay:** Same journey, different persona — compare how writer types navigate same territory
 7. **Collaborative review:** After run, second LLM evaluates project from "new reader" perspective
+8. **Custom focus areas:** Agent creates custom focus areas mid-run, testing the `custom_focus_id` workflow
